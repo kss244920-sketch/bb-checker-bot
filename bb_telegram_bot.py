@@ -93,9 +93,9 @@ bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML")
 
 # Global state
 user_sessions: Dict[int, dict] = {}
-session_lock = threading.Lock()
+session_lock = threading.RLock()
 active_scans: Dict[int, dict] = {}
-scan_lock = threading.Lock()
+scan_lock = threading.RLock()
 
 # Persistent configuration
 PANELS_FILE = os.path.join(CONFIG_DIR, "panels.json")
@@ -107,7 +107,7 @@ user_panels: Dict[int, List[str]] = {}
 user_channels: Dict[int, str] = {}
 user_storage_channels: Dict[int, str] = {}
 known_users: Set[int] = {SUPER_ADMIN_ID}
-cfg_lock = threading.Lock()
+cfg_lock = threading.RLock()
 
 def load_configs():
     global user_panels, user_channels, user_storage_channels, known_users
@@ -642,7 +642,7 @@ class BigBasketClient:
 # ============ FIREBASE ENDPOINT & OTP UTILS ============
 RESOLVED_URL_CACHE: Dict[str, str] = {}
 DEVICE_PATH_CACHE: Dict[str, str] = {}
-cache_lock = threading.Lock()
+cache_lock = threading.RLock()
 
 CANDIDATE_PATHS = [
     "messages/{did}",
@@ -1128,7 +1128,7 @@ def run_bulk_scan(chat_id: int, targets: List[Dict[str, Any]], scan_title: str =
     prog_msg = safe_send(chat_id, start_msg_text, reply_markup=markup)
     prog_id = prog_msg.message_id if prog_msg else None
     last_edit_time = [0.0]
-    update_lock = threading.Lock()
+    update_lock = threading.RLock()
 
     def update_progress_ui(cur_phone: str, cur_dev: str, cur_slot: str):
         with update_lock:
@@ -1851,6 +1851,7 @@ def start_single_flow(chat_id: int, raw_number: str):
 @bot.message_handler(commands=["start"])
 def cmd_start(message):
     chat_id = message.chat.id
+    dlog(f"cmd_start by {chat_id}")
     register_user(chat_id)
     with session_lock:
         user_sessions.pop(chat_id, None)
@@ -2452,6 +2453,7 @@ def handle_incoming_text(message):
     chat_id = message.chat.id
     register_user(chat_id)
     text = (message.text or "").strip()
+    dlog(f"Received text from {chat_id}: {text[:50]}")
 
     with session_lock:
         session = user_sessions.get(chat_id)
