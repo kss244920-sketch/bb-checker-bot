@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: bb-checker-bot
+    runtime: python
+    plan: free
+    region: oregon
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bb_telegram_bot.py
+    envVars:
+      - key: BOT_TOKEN
+        value: 8538201990:AAGdZy3HmD3nja50DlHNInJXJHL6uIpdkGc
+      - key: DEFAULT_LOG_CHANNEL
+        value: "-1003626087056"
+      - key: DEFAULT_STORAGE_CHANNEL
+        value: "-1003626087056"
+      - key: ADMIN_USER_IDS
+        value: "8327850869"
+      - key: MAX_SCAN_WORKERS
+        value: "5"
