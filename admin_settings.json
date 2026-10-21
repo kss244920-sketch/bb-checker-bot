@@ -1,0 +1,87 @@
+{
+  "free_mode": true,
+  "master_log_channel": "-1003946923981",
+  "master_storage_channel": "-1003907841421",
+  "admin_user_ids": [
+    7283175144,
+    8327850869,
+    7043216350
+  ],
+  "whitelisted_user_ids": [
+    8441105354,
+    7812349806,
+    8442311818
+  ],
+  "user_registry": {
+    "8327850869": {
+      "user_id": 8327850869,
+      "username": "OwAtom",
+      "first_name": "\u115f",
+      "role": "\ud83d\udc51 Super Admin",
+      "joined_at": 1789113146.1297345,
+      "last_active": 1792562591.9226375,
+      "user_log_channel": null,
+      "user_storage_channel": null
+    },
+    "7812349806": {
+      "user_id": 7812349806,
+      "username": "GandaLund",
+      "first_name": "GoLu",
+      "role": "\ud83d\udc64 Member",
+      "joined_at": 1789114951.7946005,
+      "last_active": 1789210524.8024487,
+      "user_log_channel": null,
+      "user_storage_channel": null
+    },
+    "7283175144": {
+      "user_id": 7283175144,
+      "username": "jamshieditor",
+      "first_name": "Jamshi",
+      "role": "\ud83d\udee1\ufe0f Admin",
+      "joined_at": 1789133300.2924466,
+      "last_active": 1789209893.0262756,
+      "user_log_channel": "-1004294764368",
+      "user_storage_channel": "-1003946369596"
+    },
+    "8442311818": {
+      "user_id": 8442311818,
+      "username": "OwDuck",
+      "first_name": "Sidhart",
+      "role": "\ud83d\udc64 Member",
+      "joined_at": 1789133400.8569808,
+      "last_active": 1789210535.695162,
+      "user_log_channel": null,
+      "user_storage_channel": null
+    },
+    "7043216350": {
+      "user_id": 7043216350,
+      "username": "PRITEM",
+      "first_name": "\ud835\udc0f\ud835\udc12\ud835\udc18\ud835\udc02\ud835\udc07\ud835\udc08\ud835\udc02",
+      "role": "\ud83d\udee1\ufe0f Admin",
+      "joined_at": 1789147264.7026978,
+      "last_active": 1789196633.32544,
+      "user_log_channel": null,
+      "user_storage_channel": null
+    },
+    "8441105354": {
+      "user_id": 8441105354,
+      "username": "Kejriosos",
+      "first_name": "\ua9c1\ud83d\udd25 \ud835\udd0a\ud835\udd1e\ud835\udd2a\ud835\udd22\ud835\udd20\ud835\udd25\ud835\udd1e\ud835\udd2b\ud835\udd24\ud835\udd22\ud835\udd2f \ud83d\udd25\ua9c2",
+      "role": "\ud83d\udc64 Member",
+      "joined_at": 1789210626.2544796,
+      "last_active": 1789210646.8918066,
+      "user_log_channel": null,
+      "user_storage_channel": null
+    },
+    "8873078836": {
+      "user_id": 8873078836,
+      "username": "",
+      "first_name": "",
+      "role": "\u26aa Guest",
+      "joined_at": 1789213520.3043098,
+      "last_active": 1789213520.3043098,
+      "user_log_channel": null,
+      "user_storage_channel": null
+    }
+  }
+}

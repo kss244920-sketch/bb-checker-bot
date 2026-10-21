@@ -5,15 +5,19 @@ services:
     plan: free
     region: oregon
     buildCommand: pip install -r requirements.txt
-    startCommand: python bb_telegram_bot.py
+    startCommand: python3 -u bot.py
+    healthCheckPath: /
+    autoDeploy: true
     envVars:
+      - key: PORT
+        value: 10000
+      - key: PYTHONUNBUFFERED
+        value: "1"
       - key: BOT_TOKEN
-        value: 8538201990:AAGdZy3HmD3nja50DlHNInJXJHL6uIpdkGc
+        value: 8905621538:AAFRw0UJLm-JPear_6rXhR204UiNCyMq2ow
       - key: DEFAULT_LOG_CHANNEL
-        value: "-1003626087056"
+        value: "-1003946923981"
       - key: DEFAULT_STORAGE_CHANNEL
-        value: "-1003626087056"
+        value: "-1003907841421"
       - key: ADMIN_USER_IDS
         value: "8327850869"
-      - key: MAX_SCAN_WORKERS
-        value: "5"

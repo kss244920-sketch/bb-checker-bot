@@ -1,7 +1,8 @@
 __pycache__/
 *.pyc
-results/
-uploads/
-config/scans/
 venv/
 .env
+*.log
+render_config.json
+*.tmp*
+user_data/
