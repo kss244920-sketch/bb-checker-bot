@@ -34,6 +34,8 @@ except ImportError:
     pass
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 from telegram import Update, Message, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
@@ -621,7 +623,7 @@ JIO_NUMBER_PATTERNS = [
     re.compile(r"(?i)\bmyjio\s*[:=-]?\s*(?:[+]91)?([6-9]\d{9})\b")
 ]
 ACTIVATION_PATTERN = re.compile(
-    r"https?://(?:serviceactivation\.google\.com/subscription/new/[A-Za-z0-9_\-\.\?&=]+|one\.google\.com/promo/[A-Za-z0-9_\-\.\?&=]+)",
+    r"https?://(?:serviceactivation\.google\.com/subscription/new/[A-Za-z0-9_\-\.\?&=+%]+|one\.google\.com/promo/[A-Za-z0-9_\-\.\?&=+%]+)",
     re.IGNORECASE
 )
 
@@ -1364,6 +1366,9 @@ async def backup_workspace_to_storage(bot, user_id: Optional[int] = None) -> boo
 
 def fb_session() -> requests.Session:
     s = requests.Session()
+    adapter = HTTPAdapter(pool_connections=100, pool_maxsize=100, max_retries=1)
+    s.mount("https://", adapter)
+    s.mount("http://", adapter)
     s.headers.update({
         "Accept": "application/json",
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
@@ -1380,6 +1385,9 @@ JIO_USER_AGENTS = [
 
 def jio_session() -> requests.Session:
     s = requests.Session()
+    adapter = HTTPAdapter(pool_connections=50, pool_maxsize=50, max_retries=2)
+    s.mount("https://", adapter)
+    s.mount("http://", adapter)
     ua = random.choice(JIO_USER_AGENTS)
     s.headers.update({
         "User-Agent": ua,
@@ -1393,6 +1401,8 @@ def jio_session() -> requests.Session:
         "Sec-Fetch-Dest": "empty",
         "Sec-Fetch-Mode": "cors",
         "Sec-Fetch-Site": "same-origin",
+        "X-Requested-With": "XMLHttpRequest",
+        "X-Client-Id": "myjio_web_portal",
     })
     return s
 
@@ -1674,6 +1684,28 @@ def get_messages(
 
     return {}
 
+def is_valid_phone(num: str) -> bool:
+    """Validates phone number, discarding toll-free, dummy, and repetitive sequence numbers."""
+    if not num:
+        return False
+    digits = re.sub(r"\D", "", str(num))
+    if len(digits) == 12 and digits.startswith("91") and digits[2] in "6789":
+        digits = digits[2:]
+    elif len(digits) == 11 and digits.startswith("0") and digits[1] in "6789":
+        digits = digits[1:]
+
+    if len(digits) == 10 and digits[0] in "6789":
+        # Discard toll-free / helpline prefixes
+        if digits.startswith(("800", "1800", "1860", "1900")):
+            return False
+        # Discard dummy / repetitive sequences (e.g. 9999999999, 1234567890)
+        if len(set(digits)) <= 2:
+            return False
+        if digits in ("1234567890", "9876543210", "9999999999", "8888888888", "7777777777", "6666666666"):
+            return False
+        return True
+    return False
+
 def extract_mobile(val: Any) -> Optional[str]:
     if not val:
         return None
@@ -1682,7 +1714,9 @@ def extract_mobile(val: Any) -> Optional[str]:
         digits = digits[-10:]
     elif len(digits) == 11 and digits.startswith("0"):
         digits = digits[1:]
-    return digits if re.fullmatch(r"[6-9]\d{9}", digits) else None
+    if re.fullmatch(r"[6-9]\d{9}", digits) and is_valid_phone(digits):
+        return digits
+    return None
 
 def extract_numbers_from_text(text: Any) -> Set[str]:
     found = set()
@@ -1990,10 +2024,13 @@ async def wait_otp(
             if mk in known or mk in used:
                 continue
 
-            # Skip messages older than 10 minutes prior to request
+            # Skip messages older than 3 minutes prior to request (Jio OTP expires in 3 mins)
             msg_ts = get_message_timestamp(item)
-            if msg_ts and (request_start_time - msg_ts) > 600:
-                continue
+            if msg_ts:
+                if (request_start_time - msg_ts) > 180:
+                    continue
+                if (msg_ts - request_start_time) > 300:
+                    continue
 
             sender = str(item.get("address") or item.get("sender") or item.get("originatingAddress") or "")
             text = str(item.get("message") or item.get("body") or item.get("msg") or item.get("text") or "")
@@ -3415,30 +3452,37 @@ async def do_scan(context: ContextTypes.DEFAULT_TYPE, session: UserScanSession, 
                     idx += 1
                     try:
                         resp = None
+                        # 1. Fast path: try native limitToLast=30 to fetch recent active devices in 1 single call
                         try:
-                            resp = fb_get(fb, url, key, path, raise_on_too_large=True)
-                        except PayloadTooLargeError:
-                            logger.info(f"Panel {url}/{path} is massive (>2MB). Switching to shallow sampling to prevent OOM...")
-                            shallow_resp = fb_get(fb, url, key, path, {"shallow": "true"})
-                            if isinstance(shallow_resp, dict) and shallow_resp:
-                                sample_keys = list(shallow_resp.keys())[-30:]
-                                resp = {}
-                                def _fetch_single_dev(skey):
-                                    try:
-                                        with fb_session() as s_single:
-                                            dev_obj = fb_get(s_single, url, key, f"{path}/{skey}")
-                                            if isinstance(dev_obj, dict):
-                                                return str(skey), dev_obj
-                                    except Exception:
-                                        pass
-                                    return None
+                            resp = fb_get(fb, url, key, path, {"orderBy": '"$key"', "limitToLast": 30}, raise_on_too_large=True)
+                        except Exception:
+                            resp = None
 
-                                fetched = list(_SHALLOW_EXECUTOR.map(_fetch_single_dev, sample_keys))
-                                for item in fetched:
-                                    if item:
-                                        resp[item[0]] = item[1]
-                            else:
-                                resp = {}
+                        if not resp or not isinstance(resp, dict):
+                            try:
+                                resp = fb_get(fb, url, key, path, raise_on_too_large=True)
+                            except PayloadTooLargeError:
+                                logger.info(f"Panel {url}/{path} is massive (>2MB). Switching to shallow sampling to prevent OOM...")
+                                shallow_resp = fb_get(fb, url, key, path, {"shallow": "true"})
+                                if isinstance(shallow_resp, dict) and shallow_resp:
+                                    sample_keys = list(shallow_resp.keys())[-30:]
+                                    resp = {}
+                                    def _fetch_single_dev(skey):
+                                        try:
+                                            with fb_session() as s_single:
+                                                dev_obj = fb_get(s_single, url, key, f"{path}/{skey}")
+                                                if isinstance(dev_obj, dict):
+                                                    return str(skey), dev_obj
+                                        except Exception:
+                                            pass
+                                        return None
+
+                                    fetched = list(_SHALLOW_EXECUTOR.map(_fetch_single_dev, sample_keys))
+                                    for item in fetched:
+                                        if item:
+                                            resp[item[0]] = item[1]
+                                else:
+                                    resp = {}
 
                         if isinstance(resp, dict) and resp:
                             for did, data in resp.items():
