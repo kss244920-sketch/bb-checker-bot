@@ -1366,7 +1366,8 @@ async def backup_workspace_to_storage(bot, user_id: Optional[int] = None) -> boo
 
 def fb_session() -> requests.Session:
     s = requests.Session()
-    adapter = HTTPAdapter(pool_connections=100, pool_maxsize=100, max_retries=1)
+    retries = Retry(total=1, backoff_factor=0.2, status_forcelist=[500, 502, 503, 504])
+    adapter = HTTPAdapter(pool_connections=100, pool_maxsize=100, max_retries=retries)
     s.mount("https://", adapter)
     s.mount("http://", adapter)
     s.headers.update({
@@ -1385,7 +1386,8 @@ JIO_USER_AGENTS = [
 
 def jio_session() -> requests.Session:
     s = requests.Session()
-    adapter = HTTPAdapter(pool_connections=50, pool_maxsize=50, max_retries=2)
+    retries = Retry(total=2, backoff_factor=0.3, status_forcelist=[500, 502, 503, 504])
+    adapter = HTTPAdapter(pool_connections=50, pool_maxsize=50, max_retries=retries)
     s.mount("https://", adapter)
     s.mount("http://", adapter)
     ua = random.choice(JIO_USER_AGENTS)
