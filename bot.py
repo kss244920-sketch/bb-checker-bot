@@ -763,12 +763,13 @@ async def log_streamer_task(bot):
                             batch_text = batch_text[-3800:]
                         msg_text = f"📟 <b>Terminal Logs</b>\n\n<pre>{batch_text}</pre>"
                         try:
-                            await safe_telegram_call(
-                                bot.send_message,
+                            await bot.send_message(
                                 chat_id=ch_id,
                                 text=msg_text,
                                 parse_mode=ParseMode.HTML,
-                                disable_web_page_preview=True
+                                disable_web_page_preview=True,
+                                write_timeout=10,
+                                connect_timeout=10
                             )
                         except Exception as e:
                             logger.debug(f"Failed to stream logs to channel {ch_id}: {e}")
@@ -1102,6 +1103,8 @@ def extract_panels_from_text(text: str) -> List[Tuple[str, str]]:
             extracted.append((canon_url, key))
     return extracted
 
+_PANELS_CACHE: Dict[str, Tuple[float, List[Tuple[str, str]]]] = {}
+
 def load_panels(user_id: Optional[int] = None) -> List[Tuple[str, str]]:
     pfile = get_user_panels_file(user_id)
     if not pfile.exists() or pfile.stat().st_size == 0:
@@ -1109,6 +1112,18 @@ def load_panels(user_id: Optional[int] = None) -> List[Tuple[str, str]]:
             pfile = PANELS_FILE
         else:
             return []
+
+    cache_key = str(pfile.resolve())
+    try:
+        cur_mtime = pfile.stat().st_mtime
+    except Exception:
+        cur_mtime = 0.0
+
+    if cache_key in _PANELS_CACHE:
+        cached_mtime, cached_data = _PANELS_CACHE[cache_key]
+        if cached_mtime == cur_mtime:
+            return list(cached_data)
+
     panels_map: Dict[str, str] = OrderedDict()
     with open(pfile, "r", encoding="utf-8", errors="ignore") as f:
         for line in f:
@@ -1119,7 +1134,9 @@ def load_panels(user_id: Optional[int] = None) -> List[Tuple[str, str]]:
             for u, k in extracted:
                 if u not in panels_map or (not panels_map[u] and k):
                     panels_map[u] = k
-    return [(u, k) for u, k in panels_map.items()]
+    res = [(u, k) for u, k in panels_map.items()]
+    _PANELS_CACHE[cache_key] = (cur_mtime, res)
+    return list(res)
 
 def save_panels(panels: List[Tuple[str, str]], user_id: Optional[int] = None):
     pfile = get_user_panels_file(user_id)
@@ -1134,6 +1151,8 @@ def save_panels(panels: List[Tuple[str, str]], user_id: Optional[int] = None):
                 else:
                     f.write(f"{u}\n")
         tmp_file.replace(pfile)
+        _PANELS_CACHE.pop(str(pfile.resolve()), None)
+        _PANELS_CACHE.pop(str(PANELS_FILE.resolve()), None)
     except Exception as e:
         logger.debug(f"save_panels failed for user {user_id}: {e}")
         try:
