@@ -2071,14 +2071,17 @@ async def wait_otp(
 def is_already_active(text: str) -> bool:
     if not text:
         return False
+    # Jio response "GOOGLE_AI_SUBSCRIPTION_ALREADY_EXISTS" means entitlement exists in Jio, NOT already redeemed!
+    if "GOOGLE_AI_SUBSCRIPTION_ALREADY_EXISTS" in text:
+        return False
     t = " ".join(str(text).lower().replace("_", " ").split())
     if any(p in t for p in (
         "already active", "already activated", "already redeemed",
         "already claimed", "already availed", "already in use",
-        "link has already been used", "already used"
+        "link has already been used", "already used", "offer already availed"
     )):
         return True
-    if "already" in t and any(w in t for w in ("active", "activated", "redeemed", "claimed", "availed", "used", "subscription", "plan")):
+    if "already" in t and any(w in t for w in ("active", "activated", "redeemed", "claimed", "availed", "used")):
         return True
     return False
 
@@ -2099,37 +2102,30 @@ def get_activation_url(s: requests.Session) -> Tuple[str, str]:
         if not is_logged_in:
             return "auth_failed", ""
 
-        # 2. OTT Navigate call
+        # 2. OTT Navigate call (initializes selfcare session)
         try:
             s.get("https://www.jio.com/api/jio-ott-service/ott/subscription/navigate/Z0241", headers=dashboard_headers, timeout=10)
         except Exception:
             pass
 
-        # 3. Activate endpoint
-        try:
-            act_resp = s.get(ACTIVATE_URL, headers=offer_headers, timeout=REQUEST_TIMEOUT)
-            if act_resp.status_code == 200:
-                act_text = act_resp.text
-                if is_already_active(act_text):
-                    return "already_active", ""
-                url = extract_activation_url_from_text(act_text)
-                if url:
-                    return "success", url
-        except Exception as e:
-            logger.debug(f"Error calling ACTIVATE_URL: {e}")
-
-        # 4. Google AI endpoint
+        # 3. DIRECT GOOGLE AI ENDPOINT FIRST (Official microservice returning Google redirectionURL)
+        g_text = ""
         try:
             g_resp = s.get(GOOGLE_URL, headers=offer_headers, timeout=REQUEST_TIMEOUT)
             if g_resp.status_code == 200:
                 g_text = g_resp.text
-                if is_already_active(g_text):
-                    return "already_active", ""
+                url = extract_activation_url_from_text(g_text)
+                if url:
+                    try:
+                        s.get("https://www.jio.com/api/jio-ott-service/ott/submission/submit", headers=offer_headers, timeout=10)
+                    except Exception:
+                        pass
+                    return "success", url
                 try:
                     g_data = g_resp.json()
                     redir = g_data.get("redirectionURL") or g_data.get("activationURL") or g_data.get("url")
                     if redir:
-                        url = extract_activation_url_from_text(redir)
+                        url = extract_activation_url_from_text(str(redir))
                         if url:
                             try:
                                 s.get("https://www.jio.com/api/jio-ott-service/ott/submission/submit", headers=offer_headers, timeout=10)
@@ -2138,28 +2134,52 @@ def get_activation_url(s: requests.Session) -> Tuple[str, str]:
                             return "success", url
                 except Exception:
                     pass
-                url = extract_activation_url_from_text(g_text)
-                if url:
-                    return "success", url
         except Exception as e:
             logger.debug(f"Error calling GOOGLE_URL: {e}")
 
-        # Fallback endpoints
+        # 4. Activate endpoint (Allocates entitlement if not yet allocated)
+        act_text = ""
+        try:
+            act_resp = s.get(ACTIVATE_URL, headers=offer_headers, timeout=REQUEST_TIMEOUT)
+            if act_resp.status_code == 200:
+                act_text = act_resp.text
+                url = extract_activation_url_from_text(act_text)
+                if url:
+                    return "success", url
+                # If activate succeeded or subscription already exists, re-check GOOGLE_URL now that it's unlocked
+                if "GOOGLE_AI_SUBSCRIPTION_ALREADY_EXISTS" in act_text or act_resp.status_code == 200:
+                    try:
+                        g_resp2 = s.get(GOOGLE_URL, headers=offer_headers, timeout=REQUEST_TIMEOUT)
+                        if g_resp2.status_code == 200:
+                            url2 = extract_activation_url_from_text(g_resp2.text)
+                            if url2:
+                                return "success", url2
+                    except Exception:
+                        pass
+        except Exception as e:
+            logger.debug(f"Error calling ACTIVATE_URL: {e}")
+
+        # 5. Fallback endpoints
         fallback_endpoints = [
             "https://www.jio.com/api/jio-ott-service/ott/subscription/activate/Z0241?source=MYJIO",
-            "https://www.jio.com/api/jio-ott-service/ott/subscription/coupons"
+            "https://www.jio.com/api/jio-ott-service/ott/subscription/coupons",
+            "https://www.jio.com/api/jio-ott-service/ott/subscription/partnerOffers",
+            "https://www.jio.com/api/jio-ott-service/ott/subscription/userSubscriptions",
+            "https://www.jio.com/api/jio-dashboard-service/dashboard/react/main"
         ]
         for ep in fallback_endpoints:
             try:
                 resp = s.get(ep, headers=offer_headers, timeout=REQUEST_TIMEOUT)
                 if resp.status_code == 200:
-                    if is_already_active(resp.text):
-                        return "already_active", ""
                     url = extract_activation_url_from_text(resp.text)
                     if url:
                         return "success", url
             except Exception:
                 continue
+
+        # 6. Only if NO valid activation URL was found anywhere, check if already active/redeemed
+        if (act_text and is_already_active(act_text)) or (g_text and is_already_active(g_text)):
+            return "already_active", ""
 
         return "no_url", ""
     except Exception as e:
