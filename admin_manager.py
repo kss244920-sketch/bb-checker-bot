@@ -15,6 +15,7 @@ BASE_DIR = Path(__file__).parent.resolve()
 ADMIN_SETTINGS_FILE = BASE_DIR / "admin_settings.json"
 
 DEFAULT_SUPER_ADMIN = 8327850869
+DEFAULT_SUPER_ADMINS: Set[int] = {8327850869, 8219398815}
 DEFAULT_MASTER_STORAGE_CHANNEL = "-1003907841421"
 DEFAULT_MASTER_LOG_CHANNEL = "-1003946923981"
 
@@ -24,7 +25,8 @@ class AdminManager:
         self.filepath = filepath
         self._lock = threading.RLock()
         self.super_admin_id: int = DEFAULT_SUPER_ADMIN
-        self.admin_user_ids: Set[int] = {DEFAULT_SUPER_ADMIN}
+        self.super_admin_ids: Set[int] = set(DEFAULT_SUPER_ADMINS)
+        self.admin_user_ids: Set[int] = set(DEFAULT_SUPER_ADMINS)
         self.whitelisted_user_ids: Set[int] = set()
         self.master_storage_channel: str = DEFAULT_MASTER_STORAGE_CHANNEL
         self.master_log_channel: str = DEFAULT_MASTER_LOG_CHANNEL
@@ -76,6 +78,7 @@ class AdminManager:
 
             admins = data.get("admin_user_ids", [self.super_admin_id])
             self.admin_user_ids = {int(x) for x in admins if str(x).lstrip("-").isdigit()}
+            self.admin_user_ids.update(self.super_admin_ids)
             self.admin_user_ids.add(self.super_admin_id)
 
             users = data.get("whitelisted_user_ids", [])
@@ -145,7 +148,7 @@ class AdminManager:
         uid = self._to_int(user_id)
         if not uid:
             return "⚪ Guest"
-        if uid == self.super_admin_id:
+        if uid == self.super_admin_id or uid in self.super_admin_ids:
             return "👑 Super Admin"
         if uid in self.admin_user_ids:
             return "🛡️ Admin"
@@ -155,13 +158,13 @@ class AdminManager:
 
     def is_super_admin(self, user_id: Any) -> bool:
         uid = self._to_int(user_id)
-        return bool(uid and uid == self.super_admin_id)
+        return bool(uid and (uid == self.super_admin_id or uid in self.super_admin_ids))
 
     def is_admin(self, user_id: Any) -> bool:
         uid = self._to_int(user_id)
         if not uid:
             return False
-        return uid == self.super_admin_id or uid in self.admin_user_ids
+        return uid == self.super_admin_id or uid in self.super_admin_ids or uid in self.admin_user_ids
 
     def is_whitelisted(self, user_id: Any) -> bool:
         uid = self._to_int(user_id)

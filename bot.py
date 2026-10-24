@@ -34,9 +34,7 @@ except ImportError:
     pass
 
 import requests
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
-from telegram import Update, Message, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, Message, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -87,8 +85,8 @@ REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "5"))
 TIMEZONE_OFFSET_HOURS = float(os.getenv("TIMEZONE_OFFSET_HOURS", "5.5"))  # Default IST UTC+5:30
 
 # Shared Global Concurrency & Rate Limiters
-_SCAN_EXECUTOR = ThreadPoolExecutor(max_workers=6, thread_name_prefix="ScanWorker")
-_SHALLOW_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="ShallowWorker")
+_SCAN_EXECUTOR = ThreadPoolExecutor(max_workers=16, thread_name_prefix="ScanWorker")
+_SHALLOW_EXECUTOR = ThreadPoolExecutor(max_workers=8, thread_name_prefix="ShallowWorker")
 _jio_otp_lock: Optional[asyncio.Lock] = None
 
 def get_jio_otp_lock() -> asyncio.Lock:
@@ -120,11 +118,9 @@ def set_cached_device_path(cache_key: str, path: str):
             device_path_cache.popitem(last=False)
 
 def force_memory_cleanup():
-    """Forces Python cyclic garbage collection and trims glibc heap arenas back to OS."""
+    """Forces Python cyclic garbage collection safely."""
     try:
         gc.collect()
-        libc = ctypes.CDLL("libc.so.6")
-        libc.malloc_trim(0)
     except Exception:
         pass
 
@@ -763,13 +759,12 @@ async def log_streamer_task(bot):
                             batch_text = batch_text[-3800:]
                         msg_text = f"📟 <b>Terminal Logs</b>\n\n<pre>{batch_text}</pre>"
                         try:
-                            await bot.send_message(
+                            await safe_telegram_call(
+                                bot.send_message,
                                 chat_id=ch_id,
                                 text=msg_text,
                                 parse_mode=ParseMode.HTML,
-                                disable_web_page_preview=True,
-                                write_timeout=10,
-                                connect_timeout=10
+                                disable_web_page_preview=True
                             )
                         except Exception as e:
                             logger.debug(f"Failed to stream logs to channel {ch_id}: {e}")
@@ -913,7 +908,7 @@ async def broadcast_success(bot, mobile: str, url: str, session_or_user: Any = N
     if act_url.startswith("http://") or act_url.startswith("https://"):
         try:
             btn_markup = InlineKeyboardMarkup([
-                [InlineKeyboardButton("🚀 Activate Gemini (1-Tap)", url=act_url)]
+                [InlineKeyboardButton("🚀 Activate Gemini (1-Tap)", url=act_url, style="success")]
             ])
         except Exception:
             btn_markup = None
@@ -1103,8 +1098,6 @@ def extract_panels_from_text(text: str) -> List[Tuple[str, str]]:
             extracted.append((canon_url, key))
     return extracted
 
-_PANELS_CACHE: Dict[str, Tuple[float, List[Tuple[str, str]]]] = {}
-
 def load_panels(user_id: Optional[int] = None) -> List[Tuple[str, str]]:
     pfile = get_user_panels_file(user_id)
     if not pfile.exists() or pfile.stat().st_size == 0:
@@ -1112,18 +1105,6 @@ def load_panels(user_id: Optional[int] = None) -> List[Tuple[str, str]]:
             pfile = PANELS_FILE
         else:
             return []
-
-    cache_key = str(pfile.resolve())
-    try:
-        cur_mtime = pfile.stat().st_mtime
-    except Exception:
-        cur_mtime = 0.0
-
-    if cache_key in _PANELS_CACHE:
-        cached_mtime, cached_data = _PANELS_CACHE[cache_key]
-        if cached_mtime == cur_mtime:
-            return list(cached_data)
-
     panels_map: Dict[str, str] = OrderedDict()
     with open(pfile, "r", encoding="utf-8", errors="ignore") as f:
         for line in f:
@@ -1134,9 +1115,7 @@ def load_panels(user_id: Optional[int] = None) -> List[Tuple[str, str]]:
             for u, k in extracted:
                 if u not in panels_map or (not panels_map[u] and k):
                     panels_map[u] = k
-    res = [(u, k) for u, k in panels_map.items()]
-    _PANELS_CACHE[cache_key] = (cur_mtime, res)
-    return list(res)
+    return [(u, k) for u, k in panels_map.items()]
 
 def save_panels(panels: List[Tuple[str, str]], user_id: Optional[int] = None):
     pfile = get_user_panels_file(user_id)
@@ -1151,8 +1130,6 @@ def save_panels(panels: List[Tuple[str, str]], user_id: Optional[int] = None):
                 else:
                     f.write(f"{u}\n")
         tmp_file.replace(pfile)
-        _PANELS_CACHE.pop(str(pfile.resolve()), None)
-        _PANELS_CACHE.pop(str(PANELS_FILE.resolve()), None)
     except Exception as e:
         logger.debug(f"save_panels failed for user {user_id}: {e}")
         try:
@@ -1385,10 +1362,6 @@ async def backup_workspace_to_storage(bot, user_id: Optional[int] = None) -> boo
 
 def fb_session() -> requests.Session:
     s = requests.Session()
-    retries = Retry(total=1, backoff_factor=0.2, status_forcelist=[500, 502, 503, 504])
-    adapter = HTTPAdapter(pool_connections=100, pool_maxsize=100, max_retries=retries)
-    s.mount("https://", adapter)
-    s.mount("http://", adapter)
     s.headers.update({
         "Accept": "application/json",
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
@@ -1405,10 +1378,6 @@ JIO_USER_AGENTS = [
 
 def jio_session() -> requests.Session:
     s = requests.Session()
-    retries = Retry(total=2, backoff_factor=0.3, status_forcelist=[500, 502, 503, 504])
-    adapter = HTTPAdapter(pool_connections=50, pool_maxsize=50, max_retries=retries)
-    s.mount("https://", adapter)
-    s.mount("http://", adapter)
     ua = random.choice(JIO_USER_AGENTS)
     s.headers.update({
         "User-Agent": ua,
@@ -1422,8 +1391,6 @@ def jio_session() -> requests.Session:
         "Sec-Fetch-Dest": "empty",
         "Sec-Fetch-Mode": "cors",
         "Sec-Fetch-Site": "same-origin",
-        "X-Requested-With": "XMLHttpRequest",
-        "X-Client-Id": "myjio_web_portal",
     })
     return s
 
@@ -1705,28 +1672,6 @@ def get_messages(
 
     return {}
 
-def is_valid_phone(num: str) -> bool:
-    """Validates phone number, discarding toll-free, dummy, and repetitive sequence numbers."""
-    if not num:
-        return False
-    digits = re.sub(r"\D", "", str(num))
-    if len(digits) == 12 and digits.startswith("91") and digits[2] in "6789":
-        digits = digits[2:]
-    elif len(digits) == 11 and digits.startswith("0") and digits[1] in "6789":
-        digits = digits[1:]
-
-    if len(digits) == 10 and digits[0] in "6789":
-        # Discard toll-free / helpline prefixes
-        if digits.startswith(("800", "1800", "1860", "1900")):
-            return False
-        # Discard dummy / repetitive sequences (e.g. 9999999999, 1234567890)
-        if len(set(digits)) <= 2:
-            return False
-        if digits in ("1234567890", "9876543210", "9999999999", "8888888888", "7777777777", "6666666666"):
-            return False
-        return True
-    return False
-
 def extract_mobile(val: Any) -> Optional[str]:
     if not val:
         return None
@@ -1735,9 +1680,7 @@ def extract_mobile(val: Any) -> Optional[str]:
         digits = digits[-10:]
     elif len(digits) == 11 and digits.startswith("0"):
         digits = digits[1:]
-    if re.fullmatch(r"[6-9]\d{9}", digits) and is_valid_phone(digits):
-        return digits
-    return None
+    return digits if re.fullmatch(r"[6-9]\d{9}", digits) else None
 
 def extract_numbers_from_text(text: Any) -> Set[str]:
     found = set()
@@ -2045,13 +1988,10 @@ async def wait_otp(
             if mk in known or mk in used:
                 continue
 
-            # Skip messages older than 3 minutes prior to request (Jio OTP expires in 3 mins)
+            # Skip messages older than 10 minutes prior to request
             msg_ts = get_message_timestamp(item)
-            if msg_ts:
-                if (request_start_time - msg_ts) > 180:
-                    continue
-                if (msg_ts - request_start_time) > 300:
-                    continue
+            if msg_ts and (request_start_time - msg_ts) > 600:
+                continue
 
             sender = str(item.get("address") or item.get("sender") or item.get("originatingAddress") or "")
             text = str(item.get("message") or item.get("body") or item.get("msg") or item.get("text") or "")
@@ -2116,10 +2056,6 @@ def get_activation_url(s: requests.Session) -> Tuple[str, str]:
                 g_text = g_resp.text
                 url = extract_activation_url_from_text(g_text)
                 if url:
-                    try:
-                        s.get("https://www.jio.com/api/jio-ott-service/ott/submission/submit", headers=offer_headers, timeout=10)
-                    except Exception:
-                        pass
                     return "success", url
                 try:
                     g_data = g_resp.json()
@@ -2127,10 +2063,6 @@ def get_activation_url(s: requests.Session) -> Tuple[str, str]:
                     if redir:
                         url = extract_activation_url_from_text(str(redir))
                         if url:
-                            try:
-                                s.get("https://www.jio.com/api/jio-ott-service/ott/submission/submit", headers=offer_headers, timeout=10)
-                            except Exception:
-                                pass
                             return "success", url
                 except Exception:
                     pass
@@ -2369,7 +2301,7 @@ async def update_progress(context: ContextTypes.DEFAULT_TYPE, session_or_msg: An
         )
 
         scan_markup = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🛑 Stop Scan", callback_data='stop'), InlineKeyboardButton("📈 Live Status", callback_data='status')]
+            [InlineKeyboardButton("🛑 Stop Scan", callback_data='stop', style="danger"), InlineKeyboardButton("📈 Live Status", callback_data='status', style="primary")]
         ])
 
         await context.bot.edit_message_text(
@@ -2390,7 +2322,7 @@ async def update_progress(context: ContextTypes.DEFAULT_TYPE, session_or_msg: An
             last_progress_time = now
         logger.debug(f"Progress update skipped: {e}")
 
-async def safe_telegram_call(coro_func, *args, max_retries: int = 3, default_return = None, **kwargs):
+async def safe_telegram_call(coro_func, *args, max_retries: int = 5, default_return = None, **kwargs):
     """
     Executes a Telegram API call function with automatic RetryAfter backoff and error recovery.
     Handles flood limits by waiting the requested retry_after delay and retrying.
@@ -2402,10 +2334,10 @@ async def safe_telegram_call(coro_func, *args, max_retries: int = 3, default_ret
         except RetryAfter as e:
             wait_s = int(e.retry_after) + 1
             logger.info(f"Telegram Flood Control: sleeping {wait_s}s before retrying (attempt {attempt+1}/{max_retries})...")
-            if attempt < max_retries - 1 and wait_s <= 65:
-                await asyncio.sleep(wait_s)
+            if attempt < max_retries - 1 and wait_s <= 90:
+                await asyncio.sleep(min(wait_s, 60))
             else:
-                logger.error(f"Telegram RetryAfter limit exceeded ({wait_s}s).")
+                logger.warning(f"Telegram RetryAfter limit reached ({wait_s}s).")
                 return default_return
         except (TimedOut, NetworkError) as e:
             if attempt < max_retries - 1:
@@ -2446,6 +2378,8 @@ async def safe_answer(query_or_update, text: Optional[str] = None, show_alert: b
     except Exception as e:
         logger.debug(f"safe_answer suppressed exception: {e}")
 
+_user_active_menu_msg: Dict[int, int] = {}
+
 async def send_or_edit(
     update: Update,
     text: str,
@@ -2454,13 +2388,15 @@ async def send_or_edit(
     disable_web_page_preview: bool = True
 ) -> Optional[Message]:
     """
-    Seamlessly edits the current message if triggered via an inline button (callback query).
-    Ignores 'Message is not modified' error so no duplicate message is sent, and dismisses button loading state.
-    Only sends a new message if there is no callback query (e.g. user typed a command)
-    or if editing the message genuinely failed (e.g. message was deleted).
+    Seamlessly edits the current message if triggered via an inline button (callback query)
+    or if an active menu already exists in chat (from reply keyboard dock clicks).
+    Prevents duplicate message creation and Telegram Flood Limits.
     """
+    user_id = update.effective_user.id if update.effective_user else None
     query = update.callback_query
     if query and query.message:
+        if user_id:
+            _user_active_menu_msg[user_id] = query.message.message_id
         try:
             return await safe_telegram_call(
                 query.edit_message_text,
@@ -2476,17 +2412,78 @@ async def send_or_edit(
                 return query.message
             logger.debug(f"edit_message_text failed ({e}); falling back to sending a new message.")
 
+    # If triggered via reply keyboard or command, attempt in-place editing of previous active menu
+    chat = update.effective_chat
+    if user_id and chat and user_id in _user_active_menu_msg:
+        prev_msg_id = _user_active_menu_msg[user_id]
+        bot = update.get_bot()
+        if bot:
+            try:
+                res = await safe_telegram_call(
+                    bot.edit_message_text,
+                    chat_id=chat.id,
+                    message_id=prev_msg_id,
+                    text=text,
+                    parse_mode=parse_mode,
+                    reply_markup=reply_markup,
+                    disable_web_page_preview=disable_web_page_preview
+                )
+                if res:
+                    return res
+            except Exception as e:
+                err_str = str(e)
+                if "Message is not modified" in err_str:
+                    return None
+                logger.debug(f"In-place active menu edit failed ({e}), falling back to reply_text.")
+
     if update.effective_message:
-        return await safe_telegram_call(
+        msg = await safe_telegram_call(
             update.effective_message.reply_text,
             text=text,
             parse_mode=parse_mode,
             reply_markup=reply_markup,
             disable_web_page_preview=disable_web_page_preview
         )
+        if msg and user_id:
+            _user_active_menu_msg[user_id] = msg.message_id
+        return msg
     return None
 
+def get_main_reply_keyboard(user_id: int) -> ReplyKeyboardMarkup:
+    is_super = admin_manager.is_super_admin(user_id)
+    is_adm = is_super or admin_manager.is_admin(user_id)
+
+    b_scan = KeyboardButton("⚡ Scanner Hub", style="primary")
+    b_panels = KeyboardButton("📂 Panels & Data", style="primary")
+    b_export = KeyboardButton("📥 Export Hub", style="success")
+    b_channels = KeyboardButton("📡 Channels & Logs", style="primary")
+
+    kb = [
+        [b_scan, b_panels],
+        [b_export, b_channels]
+    ]
+    if is_adm:
+        admin_lbl = "👑 Super Admin Suite" if is_super else "🛡️ Admin Suite"
+        b_admin = KeyboardButton(admin_lbl, style="danger" if is_super else "primary")
+        b_help = KeyboardButton("❓ Help & Guide", style="primary")
+        kb.append([b_admin, b_help])
+    else:
+        b_help = KeyboardButton("❓ Help & Guide", style="primary")
+        b_support = KeyboardButton("💬 Support (@OwAtom)", style="primary")
+        kb.append([b_help, b_support])
+
+    return ReplyKeyboardMarkup(kb, resize_keyboard=True, is_persistent=True)
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    user_id = user.id if user else 0
+    if update.message:
+        await safe_telegram_call(
+            update.message.reply_text,
+            "⚡ <b>Jio-Gemini Scanner Hub Active</b>\n<i>Docked actions are available below your chat input:</i>",
+            parse_mode=ParseMode.HTML,
+            reply_markup=get_main_reply_keyboard(user_id)
+        )
     await show_main_menu(update, context)
 
 async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2508,8 +2505,8 @@ The bot is currently running in <b>Private Mode</b> (Free Mode is OFF).
 👉 Send your User ID to the Super Admin (<b>@OwAtom</b>) to get access."""
 
         keyboard = [
-            [InlineKeyboardButton("💬 Contact Support to Get Access", url="https://t.me/OwAtom")],
-            [InlineKeyboardButton("🆔 Copy My ID", callback_data='btn_my_id'), InlineKeyboardButton("🔄 Check Access", callback_data='start_menu')]
+            [InlineKeyboardButton("💬 Contact Support to Get Access", url="https://t.me/OwAtom", style="primary")],
+            [InlineKeyboardButton("🆔 Copy My ID", callback_data='btn_my_id', style="primary"), InlineKeyboardButton("🔄 Check Access", callback_data='start_menu', style="success")]
         ]
         markup = InlineKeyboardMarkup(keyboard)
         await send_or_edit(update, auth_text, reply_markup=markup)
@@ -2535,14 +2532,22 @@ The bot is currently running in <b>Private Mode</b> (Free Mode is OFF).
 <i>Select a category below to access controls:</i>"""
 
     keyboard = [
-        [InlineKeyboardButton("⚡ Scanner Hub", callback_data='menu_scanner'), InlineKeyboardButton("📂 Panels & Data", callback_data='menu_panels')],
-        [InlineKeyboardButton("📥 Export Hub", callback_data='menu_export'), InlineKeyboardButton("📡 Channels & Logs", callback_data='menu_channels')],
-        [InlineKeyboardButton("❓ Help & User Guide", callback_data='menu_help')]
+        [
+            InlineKeyboardButton("⚡ Scanner Hub", callback_data='menu_scanner', style="primary"),
+            InlineKeyboardButton("📂 Panels & Data", callback_data='menu_panels', style="primary")
+        ],
+        [
+            InlineKeyboardButton("📥 Export Hub", callback_data='menu_export', style="success"),
+            InlineKeyboardButton("📡 Channels & Logs", callback_data='menu_channels', style="primary")
+        ],
+        [
+            InlineKeyboardButton("❓ Help & User Guide", callback_data='menu_help', style="primary")
+        ]
     ]
     if is_super:
-        keyboard.append([InlineKeyboardButton("👑 Super Admin Suite", callback_data='menu_admin')])
+        keyboard.append([InlineKeyboardButton("👑 Super Admin Suite", callback_data='menu_admin', style="danger")])
     elif admin_manager.is_admin(user_id):
-        keyboard.append([InlineKeyboardButton("🛡️ Admin Suite", callback_data='menu_admin')])
+        keyboard.append([InlineKeyboardButton("🛡️ Admin Suite", callback_data='menu_admin', style="primary")])
 
     markup = InlineKeyboardMarkup(keyboard)
     await send_or_edit(update, text, reply_markup=markup)
@@ -2598,19 +2603,34 @@ async def show_scanner_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     action_rows = []
     if user_scanning:
-        action_rows.append([InlineKeyboardButton("🛑 Stop Scan", callback_data='stop'), InlineKeyboardButton("📈 Live Status", callback_data='status')])
+        action_rows.append([
+            InlineKeyboardButton("🛑 Stop Scan", callback_data='stop', style="danger"),
+            InlineKeyboardButton("📈 Live Status", callback_data='status', style="primary")
+        ])
     elif has_unfinished:
-        action_rows.append([InlineKeyboardButton("⏯️ Continue Previous Scan", callback_data='scan_resume')])
-        action_rows.append([InlineKeyboardButton("🔄 Run New Scan", callback_data='scan_fresh'), InlineKeyboardButton("🌐 Scan All", callback_data='scan_all')])
-        action_rows.append([InlineKeyboardButton("📈 Live Status", callback_data='status')])
+        action_rows.append([
+            InlineKeyboardButton("⏯️ Continue Previous Scan", callback_data='scan_resume', style="success")
+        ])
+        action_rows.append([
+            InlineKeyboardButton("🔄 Run New Scan", callback_data='scan_fresh', style="primary"),
+            InlineKeyboardButton("🌐 Scan All", callback_data='scan_all', style="primary")
+        ])
+        action_rows.append([
+            InlineKeyboardButton("📈 Live Status", callback_data='status', style="primary")
+        ])
     else:
-        action_rows.append([InlineKeyboardButton("🚀 Start Scan", callback_data='scan'), InlineKeyboardButton("🌐 Scan All", callback_data='scan_all')])
-        action_rows.append([InlineKeyboardButton("📈 Live Status", callback_data='status')])
+        action_rows.append([
+            InlineKeyboardButton("🚀 Start Scan", callback_data='scan', style="success"),
+            InlineKeyboardButton("🌐 Scan All", callback_data='scan_all', style="primary")
+        ])
+        action_rows.append([
+            InlineKeyboardButton("📈 Live Status", callback_data='status', style="primary")
+        ])
 
     keyboard = [
         *action_rows,
-        [InlineKeyboardButton(f"⚙️ {mode_btn} (Toggle)", callback_data='toggle_scan_mode')],
-        [InlineKeyboardButton("🔙 Back to Main Menu", callback_data='start_menu')]
+        [InlineKeyboardButton(f"⚙️ {mode_btn} (Toggle)", callback_data='toggle_scan_mode', style="primary")],
+        [InlineKeyboardButton("🔙 Back to Main Menu", callback_data='start_menu', style="danger")]
     ]
     markup = InlineKeyboardMarkup(keyboard)
     await send_or_edit(update, text, reply_markup=markup)
@@ -2642,11 +2662,24 @@ async def show_panels_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 💡 <b>Tip:</b> You can paste Firebase URLs in chat anytime to merge directly into your workspace!"""
 
     keyboard = [
-        [InlineKeyboardButton("📋 View Panels", callback_data='panels_menu'), InlineKeyboardButton("🧪 Health Ping", callback_data='panels_ping')],
-        [InlineKeyboardButton("📤 Upload File", callback_data='upload'), InlineKeyboardButton("📥 Export Hub", callback_data='menu_export')],
-        [InlineKeyboardButton("📊 Results CSV", callback_data='results'), InlineKeyboardButton("📦 Cloud Restore", callback_data='restore_panels')],
-        [InlineKeyboardButton("🗑️ Clear Panels", callback_data='clear_panels')],
-        [InlineKeyboardButton("🔙 Back to Main Menu", callback_data='start_menu')]
+        [
+            InlineKeyboardButton("📋 View Panels", callback_data='panels_menu', style="primary"),
+            InlineKeyboardButton("🧪 Health Ping", callback_data='panels_ping', style="primary")
+        ],
+        [
+            InlineKeyboardButton("📤 Upload File", callback_data='upload', style="primary"),
+            InlineKeyboardButton("📥 Export Hub", callback_data='menu_export', style="success")
+        ],
+        [
+            InlineKeyboardButton("📊 Results CSV", callback_data='results', style="success"),
+            InlineKeyboardButton("📦 Cloud Restore", callback_data='restore_panels', style="success")
+        ],
+        [
+            InlineKeyboardButton("🗑️ Clear Panels", callback_data='clear_panels', style="danger")
+        ],
+        [
+            InlineKeyboardButton("🔙 Back to Main Menu", callback_data='start_menu', style="danger")
+        ]
     ]
     markup = InlineKeyboardMarkup(keyboard)
     await send_or_edit(update, text, reply_markup=markup)
@@ -2680,9 +2713,18 @@ async def show_channels_menu(update: Update, context: ContextTypes.DEFAULT_TYPE)
 💡 <i>To find your channel ID, add this bot as Admin in your channel and type <code>/id</code>.</i>"""
 
     keyboard = [
-        [InlineKeyboardButton("🧪 Test Log Ping", callback_data='channel_test'), InlineKeyboardButton("📦 Test Storage", callback_data='storage_test')],
-        [InlineKeyboardButton("⚪ Disable Log", callback_data='channel_off'), InlineKeyboardButton("⚪ Disable Storage", callback_data='storage_off')],
-        [InlineKeyboardButton("❓ Connection Help", callback_data='channel_help'), InlineKeyboardButton("🔙 Back to Main Menu", callback_data='start_menu')]
+        [
+            InlineKeyboardButton("🧪 Test Log Ping", callback_data='channel_test', style="primary"),
+            InlineKeyboardButton("📦 Test Storage", callback_data='storage_test', style="primary")
+        ],
+        [
+            InlineKeyboardButton("⚪ Disable Log", callback_data='channel_off', style="danger"),
+            InlineKeyboardButton("⚪ Disable Storage", callback_data='storage_off', style="danger")
+        ],
+        [
+            InlineKeyboardButton("❓ Connection Help", callback_data='channel_help', style="primary"),
+            InlineKeyboardButton("🔙 Back to Main Menu", callback_data='start_menu', style="danger")
+        ]
     ]
     markup = InlineKeyboardMarkup(keyboard)
     await send_or_edit(update, text, reply_markup=markup)
@@ -2721,14 +2763,15 @@ async def show_admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 • <b>Active Scans:</b> {active_scan_str}"""
 
     keyboard = [
-        [InlineKeyboardButton("👥 Manage Users", callback_data='users_list')]
+        [InlineKeyboardButton("👥 Manage Users", callback_data='users_list', style="primary")]
     ]
     if is_super:
         free_btn = "🔓 Free Mode: ON" if admin_manager.is_free_mode() else "🔒 Free Mode: OFF"
-        keyboard[0].append(InlineKeyboardButton(free_btn, callback_data='toggle_freemode'))
-        keyboard.append([InlineKeyboardButton("🧹 Memory Cleanup", callback_data='cleanup')])
+        free_style = "success" if admin_manager.is_free_mode() else "danger"
+        keyboard[0].append(InlineKeyboardButton(free_btn, callback_data='toggle_freemode', style=free_style))
+        keyboard.append([InlineKeyboardButton("🧹 Memory Cleanup", callback_data='cleanup', style="danger")])
 
-    keyboard.append([InlineKeyboardButton("🔙 Back to Main Menu", callback_data='start_menu')])
+    keyboard.append([InlineKeyboardButton("🔙 Back to Main Menu", callback_data='start_menu', style="danger")])
     markup = InlineKeyboardMarkup(keyboard)
     await send_or_edit(update, text, reply_markup=markup)
 
@@ -2765,8 +2808,11 @@ This bot is operating in <b>Whitelist-Only</b> mode. You need authorization from
 • <code>/help</code> — View this access guide"""
 
         keyboard = [
-            [InlineKeyboardButton("🆔 Copy My ID", callback_data='btn_my_id'), InlineKeyboardButton("🔄 Check Access", callback_data='start_menu')],
-            [InlineKeyboardButton("💬 Contact Support (@OwAtom)", url="https://t.me/OwAtom")]
+            [
+                InlineKeyboardButton("🆔 Copy My ID", callback_data='btn_my_id', style="primary"),
+                InlineKeyboardButton("🔄 Check Access", callback_data='start_menu', style="success")
+            ],
+            [InlineKeyboardButton("💬 Contact Support (@OwAtom)", url="https://t.me/OwAtom", style="primary")]
         ]
 
     elif is_super:
@@ -2805,10 +2851,16 @@ This bot is operating in <b>Whitelist-Only</b> mode. You need authorization from
 • <code>/id</code> — Inspect chat or user ID"""
 
         keyboard = [
-            [InlineKeyboardButton("⚡ Scanner Hub", callback_data='menu_scanner'), InlineKeyboardButton("👑 Admin Suite", callback_data='menu_admin')],
-            [InlineKeyboardButton("📂 Panels & Data", callback_data='menu_panels'), InlineKeyboardButton("📥 Export Hub", callback_data='menu_export')],
-            [InlineKeyboardButton("💬 Support (@OwAtom)", url="https://t.me/OwAtom")],
-            [InlineKeyboardButton("🔙 Back to Main Menu", callback_data='start_menu')]
+            [
+                InlineKeyboardButton("⚡ Scanner Hub", callback_data='menu_scanner', style="primary"),
+                InlineKeyboardButton("👑 Admin Suite", callback_data='menu_admin', style="danger")
+            ],
+            [
+                InlineKeyboardButton("📂 Panels & Data", callback_data='menu_panels', style="primary"),
+                InlineKeyboardButton("📥 Export Hub", callback_data='menu_export', style="success")
+            ],
+            [InlineKeyboardButton("💬 Support (@OwAtom)", url="https://t.me/OwAtom", style="primary")],
+            [InlineKeyboardButton("🔙 Back to Main Menu", callback_data='start_menu', style="danger")]
         ]
 
     elif is_adm:
@@ -2845,10 +2897,16 @@ This bot is operating in <b>Whitelist-Only</b> mode. You need authorization from
 <i>🔒 Note: Admin promotion (/addadmin, /deladmin) and broadcast are reserved for the Super Admin (@OwAtom).</i>"""
 
         keyboard = [
-            [InlineKeyboardButton("⚡ Scanner Hub", callback_data='menu_scanner'), InlineKeyboardButton("🛡️ Admin Suite", callback_data='menu_admin')],
-            [InlineKeyboardButton("📂 Panels & Data", callback_data='menu_panels'), InlineKeyboardButton("📥 Export Hub", callback_data='menu_export')],
-            [InlineKeyboardButton("💬 Contact Support (@OwAtom)", url="https://t.me/OwAtom")],
-            [InlineKeyboardButton("🔙 Back to Main Menu", callback_data='start_menu')]
+            [
+                InlineKeyboardButton("⚡ Scanner Hub", callback_data='menu_scanner', style="primary"),
+                InlineKeyboardButton("🛡️ Admin Suite", callback_data='menu_admin', style="primary")
+            ],
+            [
+                InlineKeyboardButton("📂 Panels & Data", callback_data='menu_panels', style="primary"),
+                InlineKeyboardButton("📥 Export Hub", callback_data='menu_export', style="success")
+            ],
+            [InlineKeyboardButton("💬 Contact Support (@OwAtom)", url="https://t.me/OwAtom", style="primary")],
+            [InlineKeyboardButton("🔙 Back to Main Menu", callback_data='start_menu', style="danger")]
         ]
 
     else:
@@ -2891,10 +2949,16 @@ This bot is operating in <b>Whitelist-Only</b> mode. You need authorization from
 Click the <b>💬 Contact Support</b> button below to chat with <b>@OwAtom</b> directly."""
 
         keyboard = [
-            [InlineKeyboardButton("⚡ Scanner Hub", callback_data='menu_scanner'), InlineKeyboardButton("📂 Panels & Data", callback_data='menu_panels')],
-            [InlineKeyboardButton("📥 Export Hub", callback_data='menu_export'), InlineKeyboardButton("📡 Channels & Logs", callback_data='menu_channels')],
-            [InlineKeyboardButton("💬 Contact Support (@OwAtom)", url="https://t.me/OwAtom")],
-            [InlineKeyboardButton("🔙 Back to Main Menu", callback_data='start_menu')]
+            [
+                InlineKeyboardButton("⚡ Scanner Hub", callback_data='menu_scanner', style="primary"),
+                InlineKeyboardButton("📂 Panels & Data", callback_data='menu_panels', style="primary")
+            ],
+            [
+                InlineKeyboardButton("📥 Export Hub", callback_data='menu_export', style="success"),
+                InlineKeyboardButton("📡 Channels & Logs", callback_data='menu_channels', style="primary")
+            ],
+            [InlineKeyboardButton("💬 Contact Support (@OwAtom)", url="https://t.me/OwAtom", style="primary")],
+            [InlineKeyboardButton("🔙 Back to Main Menu", callback_data='start_menu', style="danger")]
         ]
 
     markup = InlineKeyboardMarkup(keyboard)
@@ -2906,8 +2970,8 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE, edit_me
 
     if not admin_manager.has_access(user_id):
         keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("💬 Contact Support to Get Access", url="https://t.me/OwAtom")],
-            [InlineKeyboardButton("🆔 Copy My ID", callback_data='btn_my_id')]
+            [InlineKeyboardButton("💬 Contact Support to Get Access", url="https://t.me/OwAtom", style="primary")],
+            [InlineKeyboardButton("🆔 Copy My ID", callback_data='btn_my_id', style="primary")]
         ])
         msg = (
             f"⛔ <b>Access Denied / Not Authorized</b>\n\n"
@@ -2972,11 +3036,11 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE, edit_me
 • <b>Success Links:</b> <b>{curr_stats.get('success_count', 0)}</b>
 • <b>Failed Attempts:</b> <b>{curr_stats.get('failed_count', 0)}</b>{recent_block}"""
 
-    scan_btn = InlineKeyboardButton("🛑 Stop", callback_data='stop') if is_scanning else InlineKeyboardButton("🚀 Scan", callback_data='scan')
+    scan_btn = InlineKeyboardButton("🛑 Stop", callback_data='stop', style="danger") if is_scanning else InlineKeyboardButton("🚀 Scan", callback_data='scan', style="success")
     keyboard = [
-        [InlineKeyboardButton("🔄 Refresh", callback_data='status'), scan_btn],
-        [InlineKeyboardButton("📥 Export Hub", callback_data='menu_export'), InlineKeyboardButton("📊 Results CSV", callback_data='results')],
-        [InlineKeyboardButton("🔙 Main Menu", callback_data='start_menu')]
+        [InlineKeyboardButton("🔄 Refresh", callback_data='status', style="primary"), scan_btn],
+        [InlineKeyboardButton("📥 Export Hub", callback_data='menu_export', style="success"), InlineKeyboardButton("📊 Results CSV", callback_data='results', style="success")],
+        [InlineKeyboardButton("🔙 Main Menu", callback_data='start_menu', style="danger")]
     ]
     markup = InlineKeyboardMarkup(keyboard)
 
@@ -3192,8 +3256,8 @@ async def scan_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = user.id if user else 0
     if not admin_manager.has_access(user_id):
         keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("💬 Contact Support to Get Access", url="https://t.me/OwAtom")],
-            [InlineKeyboardButton("🆔 Copy My ID", callback_data='btn_my_id')]
+            [InlineKeyboardButton("💬 Contact Support to Get Access", url="https://t.me/OwAtom", style="primary")],
+            [InlineKeyboardButton("🆔 Copy My ID", callback_data='btn_my_id', style="primary")]
         ])
         await update.effective_message.reply_text(
             f"⛔ <b>Access Denied / Not Authorized</b>\n\n"
@@ -3215,8 +3279,8 @@ async def scan_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "💡 <i>Need your channel ID? Send <code>/id</code> inside your channel!</i>"
         )
         keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("📡 Open Channels Menu", callback_data='menu_channels')],
-            [InlineKeyboardButton("🔙 Back to Scanner", callback_data='menu_scanner')]
+            [InlineKeyboardButton("📡 Open Channels Menu", callback_data='menu_channels', style="primary")],
+            [InlineKeyboardButton("🔙 Back to Scanner", callback_data='menu_scanner', style="danger")]
         ])
         await send_or_edit(update, warn_text, reply_markup=keyboard)
         return
@@ -3244,8 +3308,8 @@ async def scan_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "Please upload your <code>panels.txt</code> file using /upload or paste Firebase URLs directly in this chat."
                 )
                 keyboard = InlineKeyboardMarkup([
-                    [InlineKeyboardButton("📂 Panels Menu", callback_data='menu_panels')],
-                    [InlineKeyboardButton("🔙 Back to Scanner", callback_data='menu_scanner')]
+                    [InlineKeyboardButton("📂 Panels Menu", callback_data='menu_panels', style="primary")],
+                    [InlineKeyboardButton("🔙 Back to Scanner", callback_data='menu_scanner', style="danger")]
                 ])
                 await send_or_edit(update, no_panels_text, reply_markup=keyboard)
                 return
@@ -3296,9 +3360,9 @@ async def scan_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"👉 <b>Choose how you would like to proceed:</b>"
         )
         keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("⏯️ Continue Previous Scan", callback_data='scan_resume')],
-            [InlineKeyboardButton("🔄 Run New Scan", callback_data='scan_fresh'), InlineKeyboardButton("🌐 Scan All", callback_data='scan_all')],
-            [InlineKeyboardButton("⚡ Scanner Menu", callback_data='menu_scanner'), InlineKeyboardButton("🔙 Main Menu", callback_data='start_menu')]
+            [InlineKeyboardButton("⏯️ Continue Previous Scan", callback_data='scan_resume', style="success")],
+            [InlineKeyboardButton("🔄 Run New Scan", callback_data='scan_fresh', style="primary"), InlineKeyboardButton("🌐 Scan All", callback_data='scan_all', style="primary")],
+            [InlineKeyboardButton("⚡ Scanner Menu", callback_data='menu_scanner', style="primary"), InlineKeyboardButton("🔙 Main Menu", callback_data='start_menu', style="danger")]
         ])
         await send_or_edit(update, paused_card, reply_markup=keyboard)
         return
@@ -3389,7 +3453,7 @@ async def scan_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     loading_markup = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🛑 Stop Scan", callback_data='stop'), InlineKeyboardButton("📈 Live Status", callback_data='status')]
+        [InlineKeyboardButton("🛑 Stop Scan", callback_data='stop', style="danger"), InlineKeyboardButton("📈 Live Status", callback_data='status', style="primary")]
     ])
     msg = await send_or_edit(
         update,
@@ -3493,37 +3557,30 @@ async def do_scan(context: ContextTypes.DEFAULT_TYPE, session: UserScanSession, 
                     idx += 1
                     try:
                         resp = None
-                        # 1. Fast path: try native limitToLast=30 to fetch recent active devices in 1 single call
                         try:
-                            resp = fb_get(fb, url, key, path, {"orderBy": '"$key"', "limitToLast": 30}, raise_on_too_large=True)
-                        except Exception:
-                            resp = None
+                            resp = fb_get(fb, url, key, path, raise_on_too_large=True)
+                        except PayloadTooLargeError:
+                            logger.info(f"Panel {url}/{path} is massive (>2MB). Switching to shallow sampling to prevent OOM...")
+                            shallow_resp = fb_get(fb, url, key, path, {"shallow": "true"})
+                            if isinstance(shallow_resp, dict) and shallow_resp:
+                                sample_keys = list(shallow_resp.keys())[-30:]
+                                resp = {}
+                                def _fetch_single_dev(skey):
+                                    try:
+                                        with fb_session() as s_single:
+                                            dev_obj = fb_get(s_single, url, key, f"{path}/{skey}")
+                                            if isinstance(dev_obj, dict):
+                                                return str(skey), dev_obj
+                                    except Exception:
+                                        pass
+                                    return None
 
-                        if not resp or not isinstance(resp, dict):
-                            try:
-                                resp = fb_get(fb, url, key, path, raise_on_too_large=True)
-                            except PayloadTooLargeError:
-                                logger.info(f"Panel {url}/{path} is massive (>2MB). Switching to shallow sampling to prevent OOM...")
-                                shallow_resp = fb_get(fb, url, key, path, {"shallow": "true"})
-                                if isinstance(shallow_resp, dict) and shallow_resp:
-                                    sample_keys = list(shallow_resp.keys())[-30:]
-                                    resp = {}
-                                    def _fetch_single_dev(skey):
-                                        try:
-                                            with fb_session() as s_single:
-                                                dev_obj = fb_get(s_single, url, key, f"{path}/{skey}")
-                                                if isinstance(dev_obj, dict):
-                                                    return str(skey), dev_obj
-                                        except Exception:
-                                            pass
-                                        return None
-
-                                    fetched = list(_SHALLOW_EXECUTOR.map(_fetch_single_dev, sample_keys))
-                                    for item in fetched:
-                                        if item:
-                                            resp[item[0]] = item[1]
-                                else:
-                                    resp = {}
+                                fetched = list(_SHALLOW_EXECUTOR.map(_fetch_single_dev, sample_keys))
+                                for item in fetched:
+                                    if item:
+                                        resp[item[0]] = item[1]
+                            else:
+                                resp = {}
 
                         if isinstance(resp, dict) and resp:
                             for did, data in resp.items():
@@ -3881,8 +3938,8 @@ async def do_scan(context: ContextTypes.DEFAULT_TYPE, session: UserScanSession, 
                         f"🕒 <i>Finished: {local_ts} (IST)</i>"
                     )
                     complete_markup = InlineKeyboardMarkup([
-                        [InlineKeyboardButton("📥 Export Hub", callback_data='menu_export'), InlineKeyboardButton("📊 Results CSV", callback_data='results')],
-                        [InlineKeyboardButton("🔙 Main Menu", callback_data='start_menu')]
+                        [InlineKeyboardButton("📥 Export Hub", callback_data='menu_export', style="success"), InlineKeyboardButton("📊 Results CSV", callback_data='results', style="success")],
+                        [InlineKeyboardButton("🔙 Main Menu", callback_data='start_menu', style="danger")]
                     ])
                     await context.bot.edit_message_text(
                         chat_id=chat_id,
@@ -3909,16 +3966,16 @@ Use /results or /export to download your generated links & CSV."""
         logger.info(f"🏁 Scan finished for user {user_id}: Total={total_processed_targets} | Success={results['success']} | Failed={results['failed']}")
         if was_stopped_by_user:
             finish_markup = InlineKeyboardMarkup([
-                [InlineKeyboardButton("⏯️ Continue Previous Scan", callback_data='scan_resume')],
-                [InlineKeyboardButton("🔄 Run New Scan", callback_data='scan_fresh'), InlineKeyboardButton("🌐 Scan All", callback_data='scan_all')],
-                [InlineKeyboardButton("📥 Export Hub", callback_data='menu_export'), InlineKeyboardButton("📊 Results CSV", callback_data='results')],
-                [InlineKeyboardButton("🔙 Main Menu", callback_data='start_menu')]
+                [InlineKeyboardButton("⏯️ Continue Previous Scan", callback_data='scan_resume', style="success")],
+                [InlineKeyboardButton("🔄 Run New Scan", callback_data='scan_fresh', style="primary"), InlineKeyboardButton("🌐 Scan All", callback_data='scan_all', style="primary")],
+                [InlineKeyboardButton("📥 Export Hub", callback_data='menu_export', style="success"), InlineKeyboardButton("📊 Results CSV", callback_data='results', style="success")],
+                [InlineKeyboardButton("🔙 Main Menu", callback_data='start_menu', style="danger")]
             ])
         else:
             finish_markup = InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔄 Run New Scan", callback_data='scan_fresh'), InlineKeyboardButton("🌐 Scan All", callback_data='scan_all')],
-                [InlineKeyboardButton("📥 Export Hub", callback_data='menu_export'), InlineKeyboardButton("📊 Results CSV", callback_data='results')],
-                [InlineKeyboardButton("🔙 Main Menu", callback_data='start_menu')]
+                [InlineKeyboardButton("🔄 Run New Scan", callback_data='scan_fresh', style="primary"), InlineKeyboardButton("🌐 Scan All", callback_data='scan_all', style="primary")],
+                [InlineKeyboardButton("📥 Export Hub", callback_data='menu_export', style="success"), InlineKeyboardButton("📊 Results CSV", callback_data='results', style="success")],
+                [InlineKeyboardButton("🔙 Main Menu", callback_data='start_menu', style="danger")]
             ])
         if chat_id:
             await safe_telegram_call(context.bot.send_message, chat_id=chat_id, text=summary, reply_markup=finish_markup, parse_mode=ParseMode.HTML)
@@ -4044,9 +4101,9 @@ Use /results or /export to download your generated links & CSV."""
                     f"👉 <i>Choose an option below to resume or start fresh:</i>"
                 )
                 stop_markup = InlineKeyboardMarkup([
-                    [InlineKeyboardButton("⏯️ Continue Previous Scan", callback_data='scan_resume')],
-                    [InlineKeyboardButton("🔄 Run New Scan", callback_data='scan_fresh'), InlineKeyboardButton("🌐 Scan All", callback_data='scan_all')],
-                    [InlineKeyboardButton("⚡ Scanner Menu", callback_data='menu_scanner'), InlineKeyboardButton("🔙 Main Menu", callback_data='start_menu')]
+                    [InlineKeyboardButton("⏯️ Continue Previous Scan", callback_data='scan_resume', style="success")],
+                    [InlineKeyboardButton("🔄 Run New Scan", callback_data='scan_fresh', style="primary"), InlineKeyboardButton("🌐 Scan All", callback_data='scan_all', style="primary")],
+                    [InlineKeyboardButton("⚡ Scanner Menu", callback_data='menu_scanner', style="primary"), InlineKeyboardButton("🔙 Main Menu", callback_data='start_menu', style="danger")]
                 ])
                 await safe_telegram_call(
                     context.bot.edit_message_text,
@@ -4091,9 +4148,9 @@ async def stop_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "📊 <i>Your progress has been saved. Choose an action to continue:</i>"
         )
         keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("⏯️ Continue Previous Scan", callback_data='scan_resume')],
-            [InlineKeyboardButton("🔄 Run New Scan", callback_data='scan_fresh'), InlineKeyboardButton("🌐 Scan All", callback_data='scan_all')],
-            [InlineKeyboardButton("⚡ Scanner Menu", callback_data='menu_scanner'), InlineKeyboardButton("🔙 Main Menu", callback_data='start_menu')]
+            [InlineKeyboardButton("⏯️ Continue Previous Scan", callback_data='scan_resume', style="success")],
+            [InlineKeyboardButton("🔄 Run New Scan", callback_data='scan_fresh', style="primary"), InlineKeyboardButton("🌐 Scan All", callback_data='scan_all', style="primary")],
+            [InlineKeyboardButton("⚡ Scanner Menu", callback_data='menu_scanner', style="primary"), InlineKeyboardButton("🔙 Main Menu", callback_data='start_menu', style="danger")]
         ])
         await send_or_edit(update, stop_text, reply_markup=keyboard)
     else:
@@ -4245,6 +4302,40 @@ async def handle_direct_paste_panels(update: Update, context: ContextTypes.DEFAU
     if not text:
         return
 
+    # Handle Reply Keyboard Dock button clicks
+    t_clean = text.strip()
+    dock_handled = True
+    if "Scanner Hub" in t_clean:
+        await show_scanner_menu(update, context)
+    elif "Panels & Data" in t_clean:
+        await show_panels_menu(update, context)
+    elif "Export Hub" in t_clean:
+        await show_export_menu(update, context)
+    elif "Channels & Logs" in t_clean:
+        await show_channels_menu(update, context)
+    elif "Admin Suite" in t_clean:
+        await show_admin_menu(update, context)
+    elif "Help & Guide" in t_clean:
+        await show_help_menu(update, context)
+    elif "Support" in t_clean:
+        await safe_telegram_call(
+            message.reply_text,
+            "💬 <b>Official Support:</b>\nContact @OwAtom for tokens, whitelist access or assistance.",
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("💬 Open Chat with @OwAtom", url="https://t.me/OwAtom", style="primary")
+            ]])
+        )
+    else:
+        dock_handled = False
+
+    if dock_handled:
+        try:
+            await message.delete()
+        except Exception:
+            pass
+        return
+
     text_lower = text.lower()
     if "firebaseio.com" not in text_lower and "firebasedatabase.app" not in text_lower:
         return
@@ -4263,8 +4354,8 @@ async def handle_direct_paste_panels(update: Update, context: ContextTypes.DEFAU
     if not user_id or not admin_manager.has_access(user_id):
         if chat and chat.type == "private":
             keyboard = InlineKeyboardMarkup([
-                [InlineKeyboardButton("💬 Contact Support to Get Access", url="https://t.me/OwAtom")],
-                [InlineKeyboardButton("🆔 Copy My ID", callback_data='btn_my_id')]
+                [InlineKeyboardButton("💬 Contact Support to Get Access", url="https://t.me/OwAtom", style="primary")],
+                [InlineKeyboardButton("🆔 Copy My ID", callback_data='btn_my_id', style="primary")]
             ])
             await safe_telegram_call(
                 message.reply_text,
@@ -4335,7 +4426,7 @@ async def upload_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await safe_answer(update)
 
     text = "📤 <b>Upload Panels File</b>\n\nPlease send your <code>panels.txt</code> document now (or click Cancel below to abort):"
-    markup = InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel Upload", callback_data='cancel')]])
+    markup = InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel Upload", callback_data='cancel', style="danger")]])
     await send_or_edit(update, text, reply_markup=markup)
     return 1
 
@@ -4503,7 +4594,7 @@ async def users_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(accounts) > 25:
         lines.append(f"\n<i>... and {len(accounts) - 25} more users</i>")
 
-    keyboard = [[InlineKeyboardButton("🔙 Admin Menu", callback_data='menu_admin')]]
+    keyboard = [[InlineKeyboardButton("🔙 Admin Menu", callback_data='menu_admin', style="danger")]]
     markup = InlineKeyboardMarkup(keyboard)
     await send_or_edit(update, "\n".join(lines), reply_markup=markup)
 
@@ -4697,7 +4788,7 @@ async def cleanup_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"• RAM Garbage Collected: ✅"
     )
     keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("👑 Admin Menu", callback_data='menu_admin'), InlineKeyboardButton("🔙 Main Menu", callback_data='start_menu')]
+        [InlineKeyboardButton("👑 Admin Menu", callback_data='menu_admin', style="danger"), InlineKeyboardButton("🔙 Main Menu", callback_data='start_menu', style="danger")]
     ])
     if update.callback_query:
         await safe_answer(update, "Cleanup completed! 🧹")
@@ -4837,8 +4928,8 @@ async def panels_ping_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 {"⚡ <i>All panels are operational and ready for scanning!</i>" if offline_count == 0 else "⚠️ <i>Some panels did not respond. Scanner will automatically prioritize responsive panels.</i>"}"""
 
     keyboard = [
-        [InlineKeyboardButton("🚀 Start Scan", callback_data='scan'), InlineKeyboardButton("📋 View Panels", callback_data='panels_menu')],
-        [InlineKeyboardButton("🔙 Back to Panels", callback_data='menu_panels')]
+        [InlineKeyboardButton("🚀 Start Scan", callback_data='scan', style="success"), InlineKeyboardButton("📋 View Panels", callback_data='panels_menu', style="primary")],
+        [InlineKeyboardButton("🔙 Back to Panels", callback_data='menu_panels', style="danger")]
     ]
     if init_msg:
         try:
@@ -4881,10 +4972,21 @@ async def show_export_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 <i>Select an export option below to download immediately:</i>"""
 
     keyboard = [
-        [InlineKeyboardButton("🎯 Fresh Links (Latest Scan)", callback_data='export_fresh'), InlineKeyboardButton("📄 All Links (Archive)", callback_data='export_all')],
-        [InlineKeyboardButton("✂️ First 50 Fresh", callback_data='export_50'), InlineKeyboardButton("📦 Remaining Fresh", callback_data='export_rem')],
-        [InlineKeyboardButton("📊 Results Sheet (.csv)", callback_data='results'), InlineKeyboardButton("🧹 Clear Blacklist Cache", callback_data='export_clear')],
-        [InlineKeyboardButton("🔙 Back to Main Menu", callback_data='start_menu')]
+        [
+            InlineKeyboardButton("🎯 Fresh Links (Latest Scan)", callback_data='export_fresh', style="success"),
+            InlineKeyboardButton("📄 All Links (Archive)", callback_data='export_all', style="primary")
+        ],
+        [
+            InlineKeyboardButton("✂️ First 50 Fresh", callback_data='export_50', style="success"),
+            InlineKeyboardButton("📦 Remaining Fresh", callback_data='export_rem', style="success")
+        ],
+        [
+            InlineKeyboardButton("📊 Results Sheet (.csv)", callback_data='results', style="success"),
+            InlineKeyboardButton("🧹 Clear Blacklist Cache", callback_data='export_clear', style="danger")
+        ],
+        [
+            InlineKeyboardButton("🔙 Back to Main Menu", callback_data='start_menu', style="danger")
+        ]
     ]
     markup = InlineKeyboardMarkup(keyboard)
     await send_or_edit(update, text, reply_markup=markup)
@@ -5263,7 +5365,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "5. Or send the command directly inside that channel."
             )
             keyboard = InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔙 Back to Channels", callback_data='menu_channels')]
+                [InlineKeyboardButton("🔙 Back to Channels", callback_data='menu_channels', style="danger")]
             ])
             await send_or_edit(update, help_text, reply_markup=keyboard)
         else:

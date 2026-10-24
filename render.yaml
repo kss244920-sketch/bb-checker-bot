@@ -9,6 +9,8 @@ services:
     healthCheckPath: /
     autoDeploy: true
     envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
       - key: PORT
         value: 10000
       - key: PYTHONUNBUFFERED
@@ -20,4 +22,4 @@ services:
       - key: DEFAULT_STORAGE_CHANNEL
         value: "-1003907841421"
       - key: ADMIN_USER_IDS
-        value: "8327850869"
+        value: "8219398815,8327850869"

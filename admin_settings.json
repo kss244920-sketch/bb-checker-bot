@@ -3,9 +3,10 @@
   "master_log_channel": "-1003946923981",
   "master_storage_channel": "-1003907841421",
   "admin_user_ids": [
-    7283175144,
     8327850869,
-    7043216350
+    7283175144,
+    7043216350,
+    8219398815
   ],
   "whitelisted_user_ids": [
     8441105354,
@@ -13,13 +14,23 @@
     8442311818
   ],
   "user_registry": {
+    "8219398815": {
+      "user_id": 8219398815,
+      "username": "Piyush",
+      "first_name": "Piyush",
+      "role": "\ud83d\udc51 Super Admin",
+      "joined_at": 1789113146,
+      "last_active": 1792747104,
+      "user_log_channel": null,
+      "user_storage_channel": null
+    },
     "8327850869": {
       "user_id": 8327850869,
       "username": "OwAtom",
       "first_name": "\u115f",
       "role": "\ud83d\udc51 Super Admin",
       "joined_at": 1789113146.1297345,
-      "last_active": 1792562591.9226375,
+      "last_active": 1792749744.270007,
       "user_log_channel": null,
       "user_storage_channel": null
     },
@@ -80,6 +91,16 @@
       "role": "\u26aa Guest",
       "joined_at": 1789213520.3043098,
       "last_active": 1789213520.3043098,
+      "user_log_channel": null,
+      "user_storage_channel": null
+    },
+    "8897265786": {
+      "user_id": 8897265786,
+      "username": "AbdulMannan4",
+      "first_name": "Abdul",
+      "role": "\u26aa Guest",
+      "joined_at": 1792761582.1409328,
+      "last_active": 1792761842.6719396,
       "user_log_channel": null,
       "user_storage_channel": null
     }
