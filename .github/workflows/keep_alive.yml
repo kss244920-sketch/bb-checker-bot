@@ -25,7 +25,6 @@ jobs:
 
       - name: Run Render Continuous Anti-Sleep Loop (5 Hours)
         env:
-          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY || 'rnd_iPoVaPGzJuiJwmEM23cpVEwx0BG5' }}
-          RENDER_OWNER_ID: ${{ secrets.RENDER_OWNER_ID || 'tea-dbau9i3rjlhs73anf3og' }}
-          RENDER_SERVICE_NAME: 'bb-checker-bot'
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY || 'rnd_3tagyUF2IqkgZyiRiBHD7CbZjxAg' }}
+          RENDER_OWNER_ID: ${{ secrets.RENDER_OWNER_ID || 'tea-db5454ijnfac73963k9g' }}
         run: python scripts/keep_alive_render.py --loop 300

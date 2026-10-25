@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Render 24/7 Zero-Sleep Keep-Alive & Auto-Healer for Raxi Bot.
-Pings the Render web service URL every 10-12 minutes to bypass Render's 15-minute inactivity spin-down.
-If the service is down or unhealthy, automatically uses the Render REST API to restart it.
+Render 24/7 Zero-Sleep Keep-Alive & Auto-Healer for Telegram Bots.
+Pings the Render web service URLs every 4-8 minutes to bypass Render's 15-minute inactivity spin-down.
+If any service is down or unhealthy, automatically uses the Render REST API to restart it.
 """
 
 import os
@@ -21,6 +21,19 @@ except ImportError:
 BASE_DIR = Path(__file__).parent.parent.resolve()
 CONFIG_FILE = BASE_DIR / "render_config.json"
 LOG_FILE = BASE_DIR / "keep_alive_render.log"
+
+DEFAULT_SERVICES = [
+    {
+        "name": "bb-checker-bot",
+        "id": "srv-db5lqaflk1mc73aeqteg",
+        "url": "https://bb-checker-bot.onrender.com"
+    },
+    {
+        "name": "telegram-cloud-pc-docker",
+        "id": "srv-dbe4n88m7kps73capeog",
+        "url": "https://telegram-cloud-pc-docker.onrender.com/health"
+    }
+]
 
 
 def log(msg):
@@ -43,52 +56,16 @@ def load_config():
         except Exception as e:
             log(f"Error loading {CONFIG_FILE}: {e}")
 
-    api_key = os.environ.get("RENDER_API_KEY") or cfg.get("api_key")
-    owner_id = os.environ.get("RENDER_OWNER_ID") or cfg.get("owner_id")
-    service_id = os.environ.get("RENDER_SERVICE_ID") or cfg.get("service_id")
-    service_url = os.environ.get("RENDER_SERVICE_URL") or cfg.get("service_url")
-    service_name = os.environ.get("RENDER_SERVICE_NAME") or cfg.get("service_name") or "bb-checker-bot"
+    api_key = os.environ.get("RENDER_API_KEY") or cfg.get("api_key") or "rnd_3tagyUF2IqkgZyiRiBHD7CbZjxAg"
+    owner_id = os.environ.get("RENDER_OWNER_ID") or cfg.get("owner_id") or "tea-db5454ijnfac73963k9g"
+
+    services = cfg.get("services") or DEFAULT_SERVICES
 
     return {
         "api_key": api_key,
         "owner_id": owner_id,
-        "service_id": service_id,
-        "service_url": service_url,
-        "service_name": service_name,
+        "services": services,
     }
-
-
-def save_config(cfg):
-    try:
-        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-            json.dump(cfg, f, indent=2)
-    except Exception as e:
-        log(f"Error saving config: {e}")
-
-
-def discover_service(api_key, service_name):
-    """Discovers service ID and public URL from Render API if not configured."""
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Accept": "application/json"
-    }
-    try:
-        r = requests.get("https://api.render.com/v1/services?limit=20", headers=headers, timeout=15)
-        if r.status_code == 200:
-            services = r.json()
-            for s in services:
-                svc = s.get("service", {})
-                if svc.get("name") == service_name or service_name in svc.get("name", ""):
-                    svc_id = svc.get("id")
-                    svc_details = svc.get("serviceDetails", {})
-                    svc_url = svc_details.get("url")
-                    return svc_id, svc_url
-            if services:
-                first = services[0].get("service", {})
-                return first.get("id"), first.get("serviceDetails", {}).get("url")
-    except Exception as e:
-        log(f"API discovery error: {e}")
-    return None, None
 
 
 def restart_service(api_key, service_id):
@@ -110,53 +87,47 @@ def restart_service(api_key, service_id):
     return False
 
 
+def ping_service(api_key, svc):
+    svc_name = svc.get("name", "Unknown")
+    svc_id = svc.get("id")
+    svc_url = svc.get("url")
+
+    if not svc_url:
+        log(f"⚠️ No URL configured for service '{svc_name}'")
+        return False
+
+    ping_url = svc_url.rstrip("/") if svc_url.endswith("/health") else svc_url.rstrip("/") + "/"
+    log(f"📡 Sending Keep-Alive Ping to [{svc_name}]: {ping_url}")
+    try:
+        r = requests.get(ping_url, timeout=25)
+        if r.status_code in (200, 201, 204):
+            log(f"✅ [{svc_name}] is 100% HEALTHY & ALIVE! (HTTP {r.status_code}) - Inactivity timer reset.")
+            return True
+        else:
+            log(f"⚠️ [{svc_name}] returned unexpected status: {r.status_code}")
+    except requests.exceptions.RequestException as e:
+        log(f"❌ [{svc_name}] Ping failed: {e}")
+
+    # Self-heal if ping fails
+    if svc_id and api_key:
+        log(f"Attempting automatic revival for [{svc_name}] via Render API restart...")
+        restart_service(api_key, svc_id)
+    return False
+
+
 def ping_once():
     log("Running Render 24/7 Keep-Alive & Health Ping Check...")
     cfg = load_config()
     api_key = cfg.get("api_key")
-    service_id = cfg.get("service_id")
-    service_url = cfg.get("service_url")
-    service_name = cfg.get("service_name", "bb-checker-bot")
+    services = cfg.get("services", [])
 
-    if not api_key:
-        log("ERROR: No RENDER_API_KEY found in config or environment.")
-        return False
+    all_ok = True
+    for svc in services:
+        ok = ping_service(api_key, svc)
+        if not ok:
+            all_ok = False
 
-    if not service_url or not service_id:
-        log(f"Discovering service info for '{service_name}' via Render API...")
-        disc_id, disc_url = discover_service(api_key, service_name)
-        if disc_id:
-            service_id = disc_id
-            cfg["service_id"] = disc_id
-        if disc_url:
-            service_url = disc_url
-            cfg["service_url"] = disc_url
-        if disc_id or disc_url:
-            save_config(cfg)
-            log(f"Discovered Service: ID={service_id}, URL={service_url}")
-
-    if not service_url:
-        log(f"Notice: No active Render service URL found yet for '{service_name}'. Service needs to be provisioned first.")
-        return False
-
-    # Ping the service health endpoint to keep it alive
-    ping_url = service_url.rstrip("/") + "/"
-    log(f"📡 Sending Keep-Alive Ping to: {ping_url}")
-    try:
-        r = requests.get(ping_url, timeout=25)
-        if r.status_code == 200:
-            log(f"✅ Service is 100% HEALTHY & ALIVE! (HTTP {r.status_code}) - Inactivity timer reset.")
-            return True
-        else:
-            log(f"⚠️ Health ping returned unexpected status: {r.status_code}")
-    except requests.exceptions.RequestException as e:
-        log(f"❌ Ping failed: {e}")
-
-    # Self-heal if ping fails
-    if service_id:
-        log("Attempting automatic service revival via Render API restart...")
-        restart_service(api_key, service_id)
-    return False
+    return all_ok
 
 
 def main():

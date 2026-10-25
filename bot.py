@@ -5470,6 +5470,9 @@ async def start_health_server(port: int = None):
     Lightweight HTTP server responding to health checks and keep-alive pings.
     Dynamically binds to cloud PORT (e.g. 10000 on Render, 8080 local).
     """
+    global health_server
+    if health_server is not None:
+        return health_server
     if port is None:
         port = int(os.environ.get("PORT", 8080))
     async def handle_ping(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
@@ -5494,216 +5497,41 @@ async def start_health_server(port: int = None):
                 pass
 
     try:
-        server = await asyncio.start_server(handle_ping, "0.0.0.0", port)
+        health_server = await asyncio.start_server(handle_ping, "0.0.0.0", port)
         logger.info(f"🌐 Health & Ping HTTP Server listening on port {port}")
-        return server
+        return health_server
     except Exception as e:
         logger.warning(f"Could not bind HTTP server on port {port}: {e}")
         return None
 
 async def cloud_keepalive_daemon(application: Application):
     """
-    Autonomous 24/7 Cloud Keep-Alive Daemon running inside JustRunMy.App.
-    Pings its own public endpoint to keep the lease active with zero downtime.
-    Guaranteed no restart loops: implements persistent cooldown locking.
+    Autonomous 24/7 Cloud Keep-Alive Daemon.
+    Pings keepalive endpoint and keeps the container active with zero downtime.
     """
-    logger.info("🛡️ Autonomous Cloud Keep-Alive Daemon initialized (24/7 PC-independent).")
-    await asyncio.sleep(300)  # Wait 5 minutes after startup before first check
+    logger.info("🛡️ Autonomous Cloud Keep-Alive Daemon initialized (24/7 zero-downtime).")
+    await asyncio.sleep(60)
 
-    token_file = BASE_DIR / "jrnm_identity.token"
-    cooldown_file = USER_DATA_DIR / "keepalive_cooldown.json"
+    keep_alive_url = os.environ.get("KEEP_ALIVE_URL") or os.environ.get("RENDER_EXTERNAL_URL") or "https://bb-checker-bot.onrender.com"
+    target_url = keep_alive_url.rstrip("/") + "/"
 
     while True:
         try:
-            identity = os.environ.get("JRNM_IDENTITY", "").strip()
-            if not identity and token_file.exists():
-                try:
-                    with open(token_file, "r", encoding="utf-8") as f:
-                        identity = f.read().strip()
-                except Exception as e:
-                    logger.debug(f"[KeepAlive] Error reading token: {e}")
-
-            if not identity:
-                # Built-in fallback token for App 62268 to ensure 24/7 autonomous lease renewal
-                identity = "CfDJ8OJj33e2MidEmv/zWgEBADPZZiMDzq9eY/SZVEAf+QwKTJnSngGCtrZDX/36mQImf7bCA7YrYoQKXi6ovZu9XKi/phu0sSVq2/kslJLs19yFVNAuwh1ypf+0N4rOLynQzv6TmIeGimshVjFefjWoEsPSbQD7v7Z15Vq5yJ4rB0XprZvC1g72/3+0pQGKlOrBF/jGS+P5eK1DRptmQApE+IyzVbGx9Lk8iQERzsLhhb+s5CZmpUm2qh5C/lpH7M23opc3Hsu6drSRJvBzNWzrU7iPeO3HEB1S5RtSF93Sbo7WiQgboxuGWHpTzsGQAnccMOpGi/bZyUzwCOjuEfX80gBKMhQr6DWEDd/ZxETW0OVGLOj2zUgGZQER/uxfJGDHgJ+afGn1SZh1pm00xyk4L4+owNtwDlhxcOdx0B1GaieQba8BcJBA0Fllh+6q3IYrP58o3vQSr1Rxo/HflT9/PLr4UCOdaTup9PcVzGxtJ7q98ClliXCSDUa23CE8+Ac5FTfw/yE6Xp488V9qZIbKMDt7WkJRoVNlWhWzwkc9xaoXRp8GOKcPUUSVG1COQz2FPsOITiMkcAX6kq+cGPYusdhBiDUTXO19kWcOudTWvLCH5fuNlmTIrb/XYshPr15jLzLxpbuGxI3z/BSwQYhUycwH9fI97lueB3/oyINmojXh0ZLRvGcFsEF9zHSORnuxGA18QNa2sdB/0dMXoZzTZGZi0WMGGpU3W181SsZctAQMw6a2sAb63l7VchTdzvCsPqt3JrLdF55caskq5GjbBff5+N1UFFHAeCS5279HeC3w2Pn8TDHrwLX7uFFcXv5OWxsvogZCMttWaz9C/TgTbFA="
-
-            # Read persistent cooldown timestamp
-            now = time.time()
-            last_action_ts = 0.0
-            if cooldown_file.exists():
-                try:
-                    with open(cooldown_file, "r", encoding="utf-8") as f:
-                        c_data = json.load(f)
-                        last_action_ts = float(c_data.get("last_action_ts", 0.0))
-                except Exception:
-                    pass
-
-            headers = {"X-User-Identity": identity}
-            payload = {
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "tools/call",
-                "params": {
-                    "name": "jrnm_get_user_apps",
-                    "arguments": {}
-                }
-            }
-
             loop = asyncio.get_running_loop()
             resp = await loop.run_in_executor(
                 None,
-                lambda h=headers, p=payload: requests.post("https://justrunmy.app/api/mcp", headers=h, json=p, timeout=25)
+                lambda u=target_url: requests.get(u, timeout=20)
             )
-
             if resp.status_code == 200:
-                app_data = None
-                for line in resp.text.splitlines():
-                    if line.startswith("data:"):
-                        try:
-                            raw_data = json.loads(line[5:].strip())
-                            content = json.loads(raw_data["result"]["content"][0]["text"])
-                            items = content.get("result", {}).get("items", [])
-                            for item in items:
-                                if item.get("id") == 62268 or item.get("name") == "Telegram OTP Bot":
-                                    app_data = item
-                                    break
-                        except Exception:
-                            pass
-                        break
-
-                if app_data:
-                    props = {p["name"]: p["value"] for p in app_data.get("properties", []) if "name" in p and "value" in p}
-                    ping_left_str = props.get("com.jrnm.computed.ping_left", "")
-
-                    hours_left = 999.0
-                    try:
-                        parts = ping_left_str.split(":")
-                        if len(parts) >= 3:
-                            first = parts[0]
-                            if "." in first:
-                                d_str, h_str = first.split(".")
-                                days = int(d_str)
-                                hours = int(h_str)
-                            else:
-                                days = 0
-                                hours = int(first)
-                            minutes = int(parts[1])
-                            hours_left = (days * 24) + hours + (minutes / 60.0)
-                    except Exception:
-                        pass
-
-                    logger.info(f"🛡️ [KeepAlive] Cloud Check: Hours Left={hours_left:.2f}h (Raw: '{ping_left_str}')")
-
-                    # Ping public endpoint to renew lease with zero downtime
-                    status_payload = {
-                        "jsonrpc": "2.0",
-                        "id": 2,
-                        "method": "tools/call",
-                        "params": {"name": "jrnm_get_app_status", "arguments": {"appId": 62268}}
-                    }
-                    st_resp = await loop.run_in_executor(
-                        None,
-                        lambda h=headers, p=status_payload: requests.post("https://justrunmy.app/api/mcp", headers=h, json=p, timeout=20)
-                    )
-                    endpoint_url = None
-                    if st_resp.status_code == 200:
-                        for s_line in st_resp.text.splitlines():
-                            if s_line.startswith("data:"):
-                                try:
-                                    s_raw = json.loads(s_line[5:].strip())
-                                    s_content = json.loads(s_raw["result"]["content"][0]["text"])
-                                    eps = s_content.get("endpoints", [])
-                                    if eps and "url" in eps[0]:
-                                        endpoint_url = eps[0]["url"]
-                                except Exception:
-                                    pass
-                                break
-
-                    if endpoint_url:
-                        try:
-                            ping_resp = await loop.run_in_executor(
-                                None,
-                                lambda u=endpoint_url: requests.get(u, timeout=10)
-                            )
-                            logger.info(f"📡 [KeepAlive] Self HTTP Ping to {endpoint_url} returned HTTP {ping_resp.status_code}")
-                        except Exception as e:
-                            logger.debug(f"[KeepAlive] HTTP Ping error: {e}")
-
-                    # Keepalive renewal logic:
-                    # Normal renewal if hours_left < 3.0 (when no scan active)
-                    # Emergency renewal if hours_left < 1.2 (even if scan active, so container doesn't get hard-killed by platform!)
-                    trigger_restart = False
-                    if hours_left < 6.0 and (now - last_action_ts >= 14400):
-                        scan_active = False
-                        if USER_DATA_DIR.exists():
-                            for udir in USER_DATA_DIR.iterdir():
-                                if udir.is_dir() and udir.name.lstrip("-").isdigit():
-                                    st = load_scan_state(int(udir.name))
-                                    if st and st.get("was_running", False):
-                                        scan_active = True
-                                        break
-                        if not scan_active:
-                            sup_st = load_scan_state(admin_manager.super_admin_id)
-                            if sup_st and sup_st.get("was_running", False):
-                                scan_active = True
-
-                        if not scan_active:
-                            trigger_restart = True
-                        elif hours_left < 1.5:
-                            # CRITICAL: Timer has less than 1.5h left. If we don't restart, JustRunMy.App kills container!
-                            # Cleanly save states so auto-resume continues immediately upon restart.
-                            logger.info(f"⚡ [KeepAlive] Critical lease deadline ({hours_left:.2f}h). Preserving active scans and renewing lease...")
-                            for active_uid, active_sess in list(active_scans.items()):
-                                if active_sess and active_sess.is_active():
-                                    saved = load_scan_state(active_uid) or {}
-                                    saved["was_running"] = True
-                                    save_scan_state(active_uid, saved)
-                            trigger_restart = True
-                        else:
-                            logger.info(f"⚡ [KeepAlive] Active scan running. Buffer is {hours_left:.2f}h. Safe to defer.")
-
-                    if trigger_restart:
-                        logger.info(f"🔄 [KeepAlive] Critical timer ({hours_left:.2f}h remaining). Requesting renewal...")
-                        try:
-                            cooldown_file.parent.mkdir(parents=True, exist_ok=True)
-                            with open(cooldown_file, "w", encoding="utf-8") as f:
-                                json.dump({"last_action_ts": now}, f)
-                        except Exception:
-                            pass
-                        try:
-                            ch_id = admin_manager.get_master_log_channel()
-                            if ch_id:
-                                await safe_telegram_call(
-                                    application.bot.send_message,
-                                    chat_id=ch_id,
-                                    text=f"🔄 <b>Autonomous Cloud Keep-Alive</b>\n⏳ Timer at <code>{hours_left:.1f}h</code>. Renewing 36h lease...\n<i>Interrupted scans will automatically resume in ~15s.</i>",
-                                    parse_mode=ParseMode.HTML
-                                )
-                        except Exception:
-                            pass
-
-                        restart_payload = {
-                            "jsonrpc": "2.0",
-                            "id": 3,
-                            "method": "tools/call",
-                            "params": {
-                                "name": "jrnm_start_or_restart_app",
-                                "arguments": {"appId": 62268}
-                            }
-                        }
-                        await loop.run_in_executor(
-                            None,
-                            lambda h=headers, p=restart_payload: requests.post("https://justrunmy.app/api/mcp", headers=h, json=p, timeout=25)
-                        )
-                        logger.info("✅ Keep-alive restart triggered successfully via MCP.")
+                logger.debug(f"[KeepAlive] Cloud Ping to {target_url} successful (HTTP 200)")
             else:
-                logger.debug(f"[KeepAlive] MCP returned HTTP {resp.status_code}")
+                logger.debug(f"[KeepAlive] Cloud Ping returned HTTP {resp.status_code}")
         except asyncio.CancelledError:
             break
         except Exception as e:
-            logger.error(f"[KeepAlive] Exception in cloud_keepalive_daemon: {e}")
+            logger.debug(f"[KeepAlive] Exception in cloud_keepalive_daemon: {e}")
 
-        await asyncio.sleep(900)  # Check every 15 minutes
+        await asyncio.sleep(300)  # Check every 5 minutes
 
 async def post_init(application: Application):
     global log_task, keepalive_task, health_server
@@ -5781,6 +5609,7 @@ async def post_init(application: Application):
         logger.warning(f"Failed to set bot commands: {e}")
 
 async def post_shutdown(application: Application):
+    global log_task, keepalive_task, health_server
     if log_task and not log_task.done():
         log_task.cancel()
         try:
@@ -5793,71 +5622,88 @@ async def post_shutdown(application: Application):
             await keepalive_task
         except (asyncio.CancelledError, Exception):
             pass
+    if health_server:
+        try:
+            health_server.close()
+            await health_server.wait_closed()
+        except Exception:
+            pass
+        health_server = None
 
 def main():
     if not BOT_TOKEN:
         print("❌ Error: BOT_TOKEN is empty! Set the BOT_TOKEN environment variable.")
         return
 
-    app = (
-        Application.builder()
-        .token(BOT_TOKEN)
-        .concurrent_updates(True)
-        .post_init(post_init)
-        .post_shutdown(post_shutdown)
-        .build()
-    )
-    app.add_error_handler(error_handler)
+    while True:
+        try:
+            app = (
+                Application.builder()
+                .token(BOT_TOKEN)
+                .concurrent_updates(True)
+                .post_init(post_init)
+                .post_shutdown(post_shutdown)
+                .build()
+            )
+            app.add_error_handler(error_handler)
 
-    conv = ConversationHandler(
-        entry_points=[
-            CommandHandler('upload', upload_start),
-            CallbackQueryHandler(upload_start, pattern="^upload$")
-        ],
-        states={
-            1: [MessageHandler(filters.Document.ALL, upload_file)]
-        },
-        fallbacks=[
-            CommandHandler('cancel', upload_cancel),
-            CallbackQueryHandler(upload_cancel, pattern="^cancel$")
-        ],
-        per_message=False
-    )
+            conv = ConversationHandler(
+                entry_points=[
+                    CommandHandler("upload", upload_start),
+                    CallbackQueryHandler(upload_start, pattern="^upload$")
+                ],
+                states={
+                    1: [MessageHandler(filters.Document.ALL, upload_file)]
+                },
+                fallbacks=[
+                    CommandHandler("cancel", upload_cancel),
+                    CallbackQueryHandler(upload_cancel, pattern="^cancel$")
+                ],
+                per_message=False
+            )
 
-    # Command Handlers
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("help", help_cmd))
-    app.add_handler(CommandHandler(["scan", "scanner", "scanning", "runscan"], scan_cmd))
-    app.add_handler(CommandHandler("status", status_cmd))
-    app.add_handler(CommandHandler("channel", channel_cmd))
-    app.add_handler(CommandHandler(["setchannel", "delchannel", "unsetchannel"], setchannel_cmd, filters=filters.ALL))
-    app.add_handler(CommandHandler(["setstorage", "delstorage", "unsetstorage"], setstorage_cmd, filters=filters.ALL))
-    app.add_handler(CommandHandler("panels", panels_cmd))
-    app.add_handler(CommandHandler(["stop", "stopscan", "cancelscan"], stop_cmd))
-    app.add_handler(CommandHandler("results", results_cmd))
-    app.add_handler(CommandHandler("export", export_cmd))
-    app.add_handler(CommandHandler(["id", "chatid", "myid"], id_cmd, filters=filters.ALL))
+            # Command Handlers
+            app.add_handler(CommandHandler("start", start))
+            app.add_handler(CommandHandler("help", help_cmd))
+            app.add_handler(CommandHandler(["scan", "scanner", "scanning", "runscan"], scan_cmd))
+            app.add_handler(CommandHandler("status", status_cmd))
+            app.add_handler(CommandHandler("channel", channel_cmd))
+            app.add_handler(CommandHandler(["setchannel", "delchannel", "unsetchannel"], setchannel_cmd, filters=filters.ALL))
+            app.add_handler(CommandHandler(["setstorage", "delstorage", "unsetstorage"], setstorage_cmd, filters=filters.ALL))
+            app.add_handler(CommandHandler("panels", panels_cmd))
+            app.add_handler(CommandHandler(["stop", "stopscan", "cancelscan"], stop_cmd))
+            app.add_handler(CommandHandler("results", results_cmd))
+            app.add_handler(CommandHandler("export", export_cmd))
+            app.add_handler(CommandHandler(["id", "chatid", "myid"], id_cmd, filters=filters.ALL))
 
-    # Admin Handlers
-    app.add_handler(CommandHandler("admin", admin_cmd))
-    app.add_handler(CommandHandler("users", users_cmd))
-    app.add_handler(CommandHandler(["adduser", "add"], adduser_cmd))
-    app.add_handler(CommandHandler(["deluser", "del", "removeuser", "remuser"], deluser_cmd))
-    app.add_handler(CommandHandler("addadmin", addadmin_cmd))
-    app.add_handler(CommandHandler("deladmin", deladmin_cmd))
-    app.add_handler(CommandHandler("freemode", freemode_cmd))
-    app.add_handler(CommandHandler("broadcast", broadcast_cmd))
-    app.add_handler(CommandHandler("cleanup", cleanup_cmd))
-    app.add_handler(CommandHandler(["clearcooldown", "clearcache", "resetcooldown"], clearcooldown_cmd))
+            # Admin Handlers
+            app.add_handler(CommandHandler("admin", admin_cmd))
+            app.add_handler(CommandHandler("users", users_cmd))
+            app.add_handler(CommandHandler(["adduser", "add"], adduser_cmd))
+            app.add_handler(CommandHandler(["deluser", "del", "removeuser", "remuser"], deluser_cmd))
+            app.add_handler(CommandHandler("addadmin", addadmin_cmd))
+            app.add_handler(CommandHandler("deladmin", deladmin_cmd))
+            app.add_handler(CommandHandler("freemode", freemode_cmd))
+            app.add_handler(CommandHandler("broadcast", broadcast_cmd))
+            app.add_handler(CommandHandler("cleanup", cleanup_cmd))
+            app.add_handler(CommandHandler(["clearcooldown", "clearcache", "resetcooldown"], clearcooldown_cmd))
 
-    app.add_handler(conv)
-    app.add_handler(CallbackQueryHandler(button_handler))
+            app.add_handler(conv)
+            app.add_handler(CallbackQueryHandler(button_handler))
 
-    # Direct paste & direct document handler for Firebase URLs
-    app.add_handler(MessageHandler((filters.TEXT | filters.Document.TXT | filters.Document.FileExtension("txt")) & ~filters.COMMAND, handle_direct_paste_panels))
+            # Direct paste & direct document handler for Firebase URLs
+            app.add_handler(MessageHandler((filters.TEXT | filters.Document.TXT | filters.Document.FileExtension("txt")) & ~filters.COMMAND, handle_direct_paste_panels))
 
-    print("🤖 Bot started!")
-    app.run_polling(drop_pending_updates=True)
+            print("🤖 Bot started!")
+            app.run_polling(drop_pending_updates=True)
+            print("⚠️ Bot polling loop ended. Reconnecting in 5s...")
+            time.sleep(5)
+        except (KeyboardInterrupt, SystemExit):
+            print("🛑 Bot shutting down.")
+            break
+        except Exception as e:
+            logger.error(f"❌ Critical error in bot polling loop: {e}. Reconnecting in 5s...", exc_info=True)
+            time.sleep(5)
 
 if __name__ == "__main__":
     main()
