@@ -85,13 +85,17 @@ REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "5"))
 TIMEZONE_OFFSET_HOURS = float(os.getenv("TIMEZONE_OFFSET_HOURS", "5.5"))  # Default IST UTC+5:30
 
 # Shared Global Concurrency & Rate Limiters
-_SCAN_EXECUTOR = ThreadPoolExecutor(max_workers=16, thread_name_prefix="ScanWorker")
-_SHALLOW_EXECUTOR = ThreadPoolExecutor(max_workers=8, thread_name_prefix="ShallowWorker")
+_SCAN_EXECUTOR = ThreadPoolExecutor(max_workers=10, thread_name_prefix="ScanWorker")
+_SHALLOW_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="ShallowWorker")
 _jio_otp_lock: Optional[asyncio.Lock] = None
 
 def get_jio_otp_lock() -> asyncio.Lock:
     global _jio_otp_lock
-    if _jio_otp_lock is None:
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+    if _jio_otp_lock is None or (loop and getattr(_jio_otp_lock, "_loop", None) is not loop):
         _jio_otp_lock = asyncio.Lock()
     return _jio_otp_lock
 
@@ -1398,6 +1402,10 @@ class PayloadTooLargeError(Exception):
     """Raised when a Firebase endpoint response exceeds container memory limits."""
     pass
 
+class DeadPanelError(Exception):
+    """Raised when a Firebase panel is dead (ConnectionError/Timeout/404) to avoid wasting time probing remaining paths."""
+    pass
+
 MAX_FB_PAYLOAD_BYTES = 2 * 1024 * 1024  # 2MB cap to protect container RAM (153MB limit)
 
 def fb_get(s: requests.Session, url: str, key: str, path: str, params: Optional[dict] = None, raise_on_too_large: bool = False, max_bytes: int = MAX_FB_PAYLOAD_BYTES) -> Any:
@@ -1411,6 +1419,8 @@ def fb_get(s: requests.Session, url: str, key: str, path: str, params: Optional[
     r = None
     try:
         r = s.get(endpoint, params=q, timeout=REQUEST_TIMEOUT, stream=True)
+        if r.status_code == 404:
+            raise DeadPanelError(f"HTTP 404 on {endpoint}")
         if r.status_code == 200:
             cl = r.headers.get("content-length")
             if cl and cl.isdigit() and int(cl) > max_bytes:
@@ -1438,8 +1448,10 @@ def fb_get(s: requests.Session, url: str, key: str, path: str, params: Optional[
                 return {}
             return json.loads(raw_data.decode("utf-8", errors="replace"))
         return {}
-    except PayloadTooLargeError:
+    except (PayloadTooLargeError, DeadPanelError):
         raise
+    except (requests.exceptions.ConnectionError, requests.exceptions.ConnectTimeout) as e:
+        raise DeadPanelError(f"Connection failed for {endpoint}: {e}")
     except Exception as e:
         logger.debug(f"fb_get error for {endpoint}: {e}")
         return {}
@@ -3558,6 +3570,9 @@ async def do_scan(context: ContextTypes.DEFAULT_TYPE, session: UserScanSession, 
                         resp = None
                         try:
                             resp = fb_get(fb, url, key, path, raise_on_too_large=True)
+                        except DeadPanelError:
+                            # Panel host is dead or 404 Not Found. Skip probing remaining paths for this panel!
+                            break
                         except PayloadTooLargeError:
                             logger.info(f"Panel {url}/{path} is massive (>2MB). Switching to shallow sampling to prevent OOM...")
                             shallow_resp = fb_get(fb, url, key, path, {"shallow": "true"})
@@ -5468,22 +5483,50 @@ async def start_health_server(port: int = None):
     """
     Lightweight HTTP server responding to health checks and keep-alive pings.
     Dynamically binds to cloud PORT (e.g. 10000 on Render, 8080 local).
+    Always cleans up any existing server reference to ensure it binds on active event loop.
     """
     global health_server
     if health_server is not None:
-        return health_server
+        try:
+            health_server.close()
+        except Exception:
+            pass
+        health_server = None
+
     if port is None:
         port = int(os.environ.get("PORT", 8080))
+
     async def handle_ping(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         try:
             req_data = await asyncio.wait_for(reader.read(1024), timeout=5.0)
-            resp = (
-                b"HTTP/1.1 200 OK\r\n"
-                b"Content-Type: text/plain\r\n"
-                b"Content-Length: 2\r\n"
-                b"Connection: close\r\n\r\n"
-                b"OK"
-            )
+            req_str = req_data.decode("utf-8", errors="ignore")
+            if "GET /status" in req_str:
+                import resource
+                mem_mb = round(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024, 1)
+                status_info = {
+                    "status": "online",
+                    "service": "jio-automation-bot",
+                    "uptime_sec": int(time.time() - admin_manager.bot_start_time),
+                    "active_scans": len(active_scans),
+                    "free_mode": admin_manager.is_free_mode(),
+                    "memory_mb": mem_mb,
+                    "admins": len(admin_manager.admin_user_ids)
+                }
+                body = json.dumps(status_info, indent=2).encode("utf-8")
+                resp = (
+                    b"HTTP/1.1 200 OK\r\n"
+                    b"Content-Type: application/json\r\n"
+                    b"Content-Length: " + str(len(body)).encode("utf-8") + b"\r\n"
+                    b"Connection: close\r\n\r\n" + body
+                )
+            else:
+                resp = (
+                    b"HTTP/1.1 200 OK\r\n"
+                    b"Content-Type: text/plain\r\n"
+                    b"Content-Length: 2\r\n"
+                    b"Connection: close\r\n\r\n"
+                    b"OK"
+                )
             writer.write(resp)
             await writer.drain()
         except Exception:
@@ -5530,7 +5573,7 @@ async def cloud_keepalive_daemon(application: Application):
         except Exception as e:
             logger.debug(f"[KeepAlive] Exception in cloud_keepalive_daemon: {e}")
 
-        await asyncio.sleep(300)  # Check every 5 minutes
+        await asyncio.sleep(180)  # Check every 3 minutes
 
 async def post_init(application: Application):
     global log_task, keepalive_task, health_server
@@ -5694,7 +5737,7 @@ def main():
             app.add_handler(MessageHandler((filters.TEXT | filters.Document.TXT | filters.Document.FileExtension("txt")) & ~filters.COMMAND, handle_direct_paste_panels))
 
             print("🤖 Bot started!")
-            app.run_polling(drop_pending_updates=True)
+            app.run_polling(drop_pending_updates=False)
             print("⚠️ Bot polling loop ended. Reconnecting in 5s...")
             time.sleep(5)
         except (KeyboardInterrupt, SystemExit):
