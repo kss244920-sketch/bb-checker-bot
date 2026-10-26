@@ -32,6 +32,11 @@ DEFAULT_SERVICES = [
         "name": "telegram-cloud-pc-docker",
         "id": "srv-dbe4n88m7kps73capeog",
         "url": "https://telegram-cloud-pc-docker.onrender.com/health"
+    },
+    {
+        "name": "kkftin-firebase-bot",
+        "id": "srv-dbfg0p29lscs73a0t1gg",
+        "url": "https://kkftin-firebase-bot.onrender.com"
     }
 ]
 
