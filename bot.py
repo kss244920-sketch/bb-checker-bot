@@ -908,7 +908,7 @@ async def broadcast_success(bot, mobile: str, url: str, session_or_user: Any = N
     if act_url.startswith("http://") or act_url.startswith("https://"):
         try:
             btn_markup = InlineKeyboardMarkup([
-                [InlineKeyboardButton("🚀 Activate Gemini (1-Tap)", url=act_url, style="success")]
+                [InlineKeyboardButton("🚀 Activate Gemini (1-Tap)", url=act_url)]
             ])
         except Exception:
             btn_markup = None
@@ -2301,7 +2301,7 @@ async def update_progress(context: ContextTypes.DEFAULT_TYPE, session_or_msg: An
         )
 
         scan_markup = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🛑 Stop Scan", callback_data='stop', style="danger"), InlineKeyboardButton("📈 Live Status", callback_data='status', style="primary")]
+            [InlineKeyboardButton("🛑 Stop Scan", callback_data='stop'), InlineKeyboardButton("📈 Live Status", callback_data='status')]
         ])
 
         await context.bot.edit_message_text(
@@ -2453,10 +2453,10 @@ def get_main_reply_keyboard(user_id: int) -> ReplyKeyboardMarkup:
     is_super = admin_manager.is_super_admin(user_id)
     is_adm = is_super or admin_manager.is_admin(user_id)
 
-    b_scan = KeyboardButton("⚡ Scanner Hub", style="primary")
-    b_panels = KeyboardButton("📂 Panels & Data", style="primary")
-    b_export = KeyboardButton("📥 Export Hub", style="success")
-    b_channels = KeyboardButton("📡 Channels & Logs", style="primary")
+    b_scan = KeyboardButton("⚡ Scanner Hub")
+    b_panels = KeyboardButton("📂 Panels & Data")
+    b_export = KeyboardButton("📥 Export Hub")
+    b_channels = KeyboardButton("📡 Channels & Logs")
 
     kb = [
         [b_scan, b_panels],
@@ -2464,12 +2464,12 @@ def get_main_reply_keyboard(user_id: int) -> ReplyKeyboardMarkup:
     ]
     if is_adm:
         admin_lbl = "👑 Super Admin Suite" if is_super else "🛡️ Admin Suite"
-        b_admin = KeyboardButton(admin_lbl, style="danger" if is_super else "primary")
-        b_help = KeyboardButton("❓ Help & Guide", style="primary")
+        b_admin = KeyboardButton(admin_lbl)
+        b_help = KeyboardButton("❓ Help & Guide")
         kb.append([b_admin, b_help])
     else:
-        b_help = KeyboardButton("❓ Help & Guide", style="primary")
-        b_support = KeyboardButton("💬 Support (@OwAtom)", style="primary")
+        b_help = KeyboardButton("❓ Help & Guide")
+        b_support = KeyboardButton("💬 Support (@OwAtom)")
         kb.append([b_help, b_support])
 
     return ReplyKeyboardMarkup(kb, resize_keyboard=True, is_persistent=True)
@@ -2505,8 +2505,8 @@ The bot is currently running in <b>Private Mode</b> (Free Mode is OFF).
 👉 Send your User ID to the Super Admin (<b>@OwAtom</b>) to get access."""
 
         keyboard = [
-            [InlineKeyboardButton("💬 Contact Support to Get Access", url="https://t.me/OwAtom", style="primary")],
-            [InlineKeyboardButton("🆔 Copy My ID", callback_data='btn_my_id', style="primary"), InlineKeyboardButton("🔄 Check Access", callback_data='start_menu', style="success")]
+            [InlineKeyboardButton("💬 Contact Support to Get Access", url="https://t.me/OwAtom")],
+            [InlineKeyboardButton("🆔 Copy My ID", callback_data='btn_my_id'), InlineKeyboardButton("🔄 Check Access", callback_data='start_menu')]
         ]
         markup = InlineKeyboardMarkup(keyboard)
         await send_or_edit(update, auth_text, reply_markup=markup)
@@ -2533,21 +2533,21 @@ The bot is currently running in <b>Private Mode</b> (Free Mode is OFF).
 
     keyboard = [
         [
-            InlineKeyboardButton("⚡ Scanner Hub", callback_data='menu_scanner', style="primary"),
-            InlineKeyboardButton("📂 Panels & Data", callback_data='menu_panels', style="primary")
+            InlineKeyboardButton("⚡ Scanner Hub", callback_data='menu_scanner'),
+            InlineKeyboardButton("📂 Panels & Data", callback_data='menu_panels')
         ],
         [
-            InlineKeyboardButton("📥 Export Hub", callback_data='menu_export', style="success"),
-            InlineKeyboardButton("📡 Channels & Logs", callback_data='menu_channels', style="primary")
+            InlineKeyboardButton("📥 Export Hub", callback_data='menu_export'),
+            InlineKeyboardButton("📡 Channels & Logs", callback_data='menu_channels')
         ],
         [
-            InlineKeyboardButton("❓ Help & User Guide", callback_data='menu_help', style="primary")
+            InlineKeyboardButton("❓ Help & User Guide", callback_data='menu_help')
         ]
     ]
     if is_super:
-        keyboard.append([InlineKeyboardButton("👑 Super Admin Suite", callback_data='menu_admin', style="danger")])
+        keyboard.append([InlineKeyboardButton("👑 Super Admin Suite", callback_data='menu_admin')])
     elif admin_manager.is_admin(user_id):
-        keyboard.append([InlineKeyboardButton("🛡️ Admin Suite", callback_data='menu_admin', style="primary")])
+        keyboard.append([InlineKeyboardButton("🛡️ Admin Suite", callback_data='menu_admin')])
 
     markup = InlineKeyboardMarkup(keyboard)
     await send_or_edit(update, text, reply_markup=markup)
@@ -2604,33 +2604,33 @@ async def show_scanner_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     action_rows = []
     if user_scanning:
         action_rows.append([
-            InlineKeyboardButton("🛑 Stop Scan", callback_data='stop', style="danger"),
-            InlineKeyboardButton("📈 Live Status", callback_data='status', style="primary")
+            InlineKeyboardButton("🛑 Stop Scan", callback_data='stop'),
+            InlineKeyboardButton("📈 Live Status", callback_data='status')
         ])
     elif has_unfinished:
         action_rows.append([
-            InlineKeyboardButton("⏯️ Continue Previous Scan", callback_data='scan_resume', style="success")
+            InlineKeyboardButton("⏯️ Continue Previous Scan", callback_data='scan_resume')
         ])
         action_rows.append([
-            InlineKeyboardButton("🔄 Run New Scan", callback_data='scan_fresh', style="primary"),
-            InlineKeyboardButton("🌐 Scan All", callback_data='scan_all', style="primary")
+            InlineKeyboardButton("🔄 Run New Scan", callback_data='scan_fresh'),
+            InlineKeyboardButton("🌐 Scan All", callback_data='scan_all')
         ])
         action_rows.append([
-            InlineKeyboardButton("📈 Live Status", callback_data='status', style="primary")
+            InlineKeyboardButton("📈 Live Status", callback_data='status')
         ])
     else:
         action_rows.append([
-            InlineKeyboardButton("🚀 Start Scan", callback_data='scan', style="success"),
-            InlineKeyboardButton("🌐 Scan All", callback_data='scan_all', style="primary")
+            InlineKeyboardButton("🚀 Start Scan", callback_data='scan'),
+            InlineKeyboardButton("🌐 Scan All", callback_data='scan_all')
         ])
         action_rows.append([
-            InlineKeyboardButton("📈 Live Status", callback_data='status', style="primary")
+            InlineKeyboardButton("📈 Live Status", callback_data='status')
         ])
 
     keyboard = [
         *action_rows,
-        [InlineKeyboardButton(f"⚙️ {mode_btn} (Toggle)", callback_data='toggle_scan_mode', style="primary")],
-        [InlineKeyboardButton("🔙 Back to Main Menu", callback_data='start_menu', style="danger")]
+        [InlineKeyboardButton(f"⚙️ {mode_btn} (Toggle)", callback_data='toggle_scan_mode')],
+        [InlineKeyboardButton("🔙 Back to Main Menu", callback_data='start_menu')]
     ]
     markup = InlineKeyboardMarkup(keyboard)
     await send_or_edit(update, text, reply_markup=markup)
@@ -2663,22 +2663,22 @@ async def show_panels_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     keyboard = [
         [
-            InlineKeyboardButton("📋 View Panels", callback_data='panels_menu', style="primary"),
-            InlineKeyboardButton("🧪 Health Ping", callback_data='panels_ping', style="primary")
+            InlineKeyboardButton("📋 View Panels", callback_data='panels_menu'),
+            InlineKeyboardButton("🧪 Health Ping", callback_data='panels_ping')
         ],
         [
-            InlineKeyboardButton("📤 Upload File", callback_data='upload', style="primary"),
-            InlineKeyboardButton("📥 Export Hub", callback_data='menu_export', style="success")
+            InlineKeyboardButton("📤 Upload File", callback_data='upload'),
+            InlineKeyboardButton("📥 Export Hub", callback_data='menu_export')
         ],
         [
-            InlineKeyboardButton("📊 Results CSV", callback_data='results', style="success"),
-            InlineKeyboardButton("📦 Cloud Restore", callback_data='restore_panels', style="success")
+            InlineKeyboardButton("📊 Results CSV", callback_data='results'),
+            InlineKeyboardButton("📦 Cloud Restore", callback_data='restore_panels')
         ],
         [
-            InlineKeyboardButton("🗑️ Clear Panels", callback_data='clear_panels', style="danger")
+            InlineKeyboardButton("🗑️ Clear Panels", callback_data='clear_panels')
         ],
         [
-            InlineKeyboardButton("🔙 Back to Main Menu", callback_data='start_menu', style="danger")
+            InlineKeyboardButton("🔙 Back to Main Menu", callback_data='start_menu')
         ]
     ]
     markup = InlineKeyboardMarkup(keyboard)
@@ -2714,16 +2714,16 @@ async def show_channels_menu(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     keyboard = [
         [
-            InlineKeyboardButton("🧪 Test Log Ping", callback_data='channel_test', style="primary"),
-            InlineKeyboardButton("📦 Test Storage", callback_data='storage_test', style="primary")
+            InlineKeyboardButton("🧪 Test Log Ping", callback_data='channel_test'),
+            InlineKeyboardButton("📦 Test Storage", callback_data='storage_test')
         ],
         [
-            InlineKeyboardButton("⚪ Disable Log", callback_data='channel_off', style="danger"),
-            InlineKeyboardButton("⚪ Disable Storage", callback_data='storage_off', style="danger")
+            InlineKeyboardButton("⚪ Disable Log", callback_data='channel_off'),
+            InlineKeyboardButton("⚪ Disable Storage", callback_data='storage_off')
         ],
         [
-            InlineKeyboardButton("❓ Connection Help", callback_data='channel_help', style="primary"),
-            InlineKeyboardButton("🔙 Back to Main Menu", callback_data='start_menu', style="danger")
+            InlineKeyboardButton("❓ Connection Help", callback_data='channel_help'),
+            InlineKeyboardButton("🔙 Back to Main Menu", callback_data='start_menu')
         ]
     ]
     markup = InlineKeyboardMarkup(keyboard)
@@ -2763,15 +2763,14 @@ async def show_admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 • <b>Active Scans:</b> {active_scan_str}"""
 
     keyboard = [
-        [InlineKeyboardButton("👥 Manage Users", callback_data='users_list', style="primary")]
+        [InlineKeyboardButton("👥 Manage Users", callback_data='users_list')]
     ]
     if is_super:
         free_btn = "🔓 Free Mode: ON" if admin_manager.is_free_mode() else "🔒 Free Mode: OFF"
-        free_style = "success" if admin_manager.is_free_mode() else "danger"
-        keyboard[0].append(InlineKeyboardButton(free_btn, callback_data='toggle_freemode', style=free_style))
-        keyboard.append([InlineKeyboardButton("🧹 Memory Cleanup", callback_data='cleanup', style="danger")])
+        keyboard[0].append(InlineKeyboardButton(free_btn, callback_data='toggle_freemode'))
+        keyboard.append([InlineKeyboardButton("🧹 Memory Cleanup", callback_data='cleanup')])
 
-    keyboard.append([InlineKeyboardButton("🔙 Back to Main Menu", callback_data='start_menu', style="danger")])
+    keyboard.append([InlineKeyboardButton("🔙 Back to Main Menu", callback_data='start_menu')])
     markup = InlineKeyboardMarkup(keyboard)
     await send_or_edit(update, text, reply_markup=markup)
 
@@ -2809,10 +2808,10 @@ This bot is operating in <b>Whitelist-Only</b> mode. You need authorization from
 
         keyboard = [
             [
-                InlineKeyboardButton("🆔 Copy My ID", callback_data='btn_my_id', style="primary"),
-                InlineKeyboardButton("🔄 Check Access", callback_data='start_menu', style="success")
+                InlineKeyboardButton("🆔 Copy My ID", callback_data='btn_my_id'),
+                InlineKeyboardButton("🔄 Check Access", callback_data='start_menu')
             ],
-            [InlineKeyboardButton("💬 Contact Support (@OwAtom)", url="https://t.me/OwAtom", style="primary")]
+            [InlineKeyboardButton("💬 Contact Support (@OwAtom)", url="https://t.me/OwAtom")]
         ]
 
     elif is_super:
@@ -2852,15 +2851,15 @@ This bot is operating in <b>Whitelist-Only</b> mode. You need authorization from
 
         keyboard = [
             [
-                InlineKeyboardButton("⚡ Scanner Hub", callback_data='menu_scanner', style="primary"),
-                InlineKeyboardButton("👑 Admin Suite", callback_data='menu_admin', style="danger")
+                InlineKeyboardButton("⚡ Scanner Hub", callback_data='menu_scanner'),
+                InlineKeyboardButton("👑 Admin Suite", callback_data='menu_admin')
             ],
             [
-                InlineKeyboardButton("📂 Panels & Data", callback_data='menu_panels', style="primary"),
-                InlineKeyboardButton("📥 Export Hub", callback_data='menu_export', style="success")
+                InlineKeyboardButton("📂 Panels & Data", callback_data='menu_panels'),
+                InlineKeyboardButton("📥 Export Hub", callback_data='menu_export')
             ],
-            [InlineKeyboardButton("💬 Support (@OwAtom)", url="https://t.me/OwAtom", style="primary")],
-            [InlineKeyboardButton("🔙 Back to Main Menu", callback_data='start_menu', style="danger")]
+            [InlineKeyboardButton("💬 Support (@OwAtom)", url="https://t.me/OwAtom")],
+            [InlineKeyboardButton("🔙 Back to Main Menu", callback_data='start_menu')]
         ]
 
     elif is_adm:
@@ -2898,15 +2897,15 @@ This bot is operating in <b>Whitelist-Only</b> mode. You need authorization from
 
         keyboard = [
             [
-                InlineKeyboardButton("⚡ Scanner Hub", callback_data='menu_scanner', style="primary"),
-                InlineKeyboardButton("🛡️ Admin Suite", callback_data='menu_admin', style="primary")
+                InlineKeyboardButton("⚡ Scanner Hub", callback_data='menu_scanner'),
+                InlineKeyboardButton("🛡️ Admin Suite", callback_data='menu_admin')
             ],
             [
-                InlineKeyboardButton("📂 Panels & Data", callback_data='menu_panels', style="primary"),
-                InlineKeyboardButton("📥 Export Hub", callback_data='menu_export', style="success")
+                InlineKeyboardButton("📂 Panels & Data", callback_data='menu_panels'),
+                InlineKeyboardButton("📥 Export Hub", callback_data='menu_export')
             ],
-            [InlineKeyboardButton("💬 Contact Support (@OwAtom)", url="https://t.me/OwAtom", style="primary")],
-            [InlineKeyboardButton("🔙 Back to Main Menu", callback_data='start_menu', style="danger")]
+            [InlineKeyboardButton("💬 Contact Support (@OwAtom)", url="https://t.me/OwAtom")],
+            [InlineKeyboardButton("🔙 Back to Main Menu", callback_data='start_menu')]
         ]
 
     else:
@@ -2950,15 +2949,15 @@ Click the <b>💬 Contact Support</b> button below to chat with <b>@OwAtom</b> d
 
         keyboard = [
             [
-                InlineKeyboardButton("⚡ Scanner Hub", callback_data='menu_scanner', style="primary"),
-                InlineKeyboardButton("📂 Panels & Data", callback_data='menu_panels', style="primary")
+                InlineKeyboardButton("⚡ Scanner Hub", callback_data='menu_scanner'),
+                InlineKeyboardButton("📂 Panels & Data", callback_data='menu_panels')
             ],
             [
-                InlineKeyboardButton("📥 Export Hub", callback_data='menu_export', style="success"),
-                InlineKeyboardButton("📡 Channels & Logs", callback_data='menu_channels', style="primary")
+                InlineKeyboardButton("📥 Export Hub", callback_data='menu_export'),
+                InlineKeyboardButton("📡 Channels & Logs", callback_data='menu_channels')
             ],
-            [InlineKeyboardButton("💬 Contact Support (@OwAtom)", url="https://t.me/OwAtom", style="primary")],
-            [InlineKeyboardButton("🔙 Back to Main Menu", callback_data='start_menu', style="danger")]
+            [InlineKeyboardButton("💬 Contact Support (@OwAtom)", url="https://t.me/OwAtom")],
+            [InlineKeyboardButton("🔙 Back to Main Menu", callback_data='start_menu')]
         ]
 
     markup = InlineKeyboardMarkup(keyboard)
@@ -2970,8 +2969,8 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE, edit_me
 
     if not admin_manager.has_access(user_id):
         keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("💬 Contact Support to Get Access", url="https://t.me/OwAtom", style="primary")],
-            [InlineKeyboardButton("🆔 Copy My ID", callback_data='btn_my_id', style="primary")]
+            [InlineKeyboardButton("💬 Contact Support to Get Access", url="https://t.me/OwAtom")],
+            [InlineKeyboardButton("🆔 Copy My ID", callback_data='btn_my_id')]
         ])
         msg = (
             f"⛔ <b>Access Denied / Not Authorized</b>\n\n"
@@ -3036,11 +3035,11 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE, edit_me
 • <b>Success Links:</b> <b>{curr_stats.get('success_count', 0)}</b>
 • <b>Failed Attempts:</b> <b>{curr_stats.get('failed_count', 0)}</b>{recent_block}"""
 
-    scan_btn = InlineKeyboardButton("🛑 Stop", callback_data='stop', style="danger") if is_scanning else InlineKeyboardButton("🚀 Scan", callback_data='scan', style="success")
+    scan_btn = InlineKeyboardButton("🛑 Stop", callback_data='stop') if is_scanning else InlineKeyboardButton("🚀 Scan", callback_data='scan')
     keyboard = [
-        [InlineKeyboardButton("🔄 Refresh", callback_data='status', style="primary"), scan_btn],
-        [InlineKeyboardButton("📥 Export Hub", callback_data='menu_export', style="success"), InlineKeyboardButton("📊 Results CSV", callback_data='results', style="success")],
-        [InlineKeyboardButton("🔙 Main Menu", callback_data='start_menu', style="danger")]
+        [InlineKeyboardButton("🔄 Refresh", callback_data='status'), scan_btn],
+        [InlineKeyboardButton("📥 Export Hub", callback_data='menu_export'), InlineKeyboardButton("📊 Results CSV", callback_data='results')],
+        [InlineKeyboardButton("🔙 Main Menu", callback_data='start_menu')]
     ]
     markup = InlineKeyboardMarkup(keyboard)
 
@@ -3256,8 +3255,8 @@ async def scan_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = user.id if user else 0
     if not admin_manager.has_access(user_id):
         keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("💬 Contact Support to Get Access", url="https://t.me/OwAtom", style="primary")],
-            [InlineKeyboardButton("🆔 Copy My ID", callback_data='btn_my_id', style="primary")]
+            [InlineKeyboardButton("💬 Contact Support to Get Access", url="https://t.me/OwAtom")],
+            [InlineKeyboardButton("🆔 Copy My ID", callback_data='btn_my_id')]
         ])
         await update.effective_message.reply_text(
             f"⛔ <b>Access Denied / Not Authorized</b>\n\n"
@@ -3279,8 +3278,8 @@ async def scan_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "💡 <i>Need your channel ID? Send <code>/id</code> inside your channel!</i>"
         )
         keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("📡 Open Channels Menu", callback_data='menu_channels', style="primary")],
-            [InlineKeyboardButton("🔙 Back to Scanner", callback_data='menu_scanner', style="danger")]
+            [InlineKeyboardButton("📡 Open Channels Menu", callback_data='menu_channels')],
+            [InlineKeyboardButton("🔙 Back to Scanner", callback_data='menu_scanner')]
         ])
         await send_or_edit(update, warn_text, reply_markup=keyboard)
         return
@@ -3308,8 +3307,8 @@ async def scan_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "Please upload your <code>panels.txt</code> file using /upload or paste Firebase URLs directly in this chat."
                 )
                 keyboard = InlineKeyboardMarkup([
-                    [InlineKeyboardButton("📂 Panels Menu", callback_data='menu_panels', style="primary")],
-                    [InlineKeyboardButton("🔙 Back to Scanner", callback_data='menu_scanner', style="danger")]
+                    [InlineKeyboardButton("📂 Panels Menu", callback_data='menu_panels')],
+                    [InlineKeyboardButton("🔙 Back to Scanner", callback_data='menu_scanner')]
                 ])
                 await send_or_edit(update, no_panels_text, reply_markup=keyboard)
                 return
@@ -3360,9 +3359,9 @@ async def scan_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"👉 <b>Choose how you would like to proceed:</b>"
         )
         keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("⏯️ Continue Previous Scan", callback_data='scan_resume', style="success")],
-            [InlineKeyboardButton("🔄 Run New Scan", callback_data='scan_fresh', style="primary"), InlineKeyboardButton("🌐 Scan All", callback_data='scan_all', style="primary")],
-            [InlineKeyboardButton("⚡ Scanner Menu", callback_data='menu_scanner', style="primary"), InlineKeyboardButton("🔙 Main Menu", callback_data='start_menu', style="danger")]
+            [InlineKeyboardButton("⏯️ Continue Previous Scan", callback_data='scan_resume')],
+            [InlineKeyboardButton("🔄 Run New Scan", callback_data='scan_fresh'), InlineKeyboardButton("🌐 Scan All", callback_data='scan_all')],
+            [InlineKeyboardButton("⚡ Scanner Menu", callback_data='menu_scanner'), InlineKeyboardButton("🔙 Main Menu", callback_data='start_menu')]
         ])
         await send_or_edit(update, paused_card, reply_markup=keyboard)
         return
@@ -3453,7 +3452,7 @@ async def scan_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     loading_markup = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🛑 Stop Scan", callback_data='stop', style="danger"), InlineKeyboardButton("📈 Live Status", callback_data='status', style="primary")]
+        [InlineKeyboardButton("🛑 Stop Scan", callback_data='stop'), InlineKeyboardButton("📈 Live Status", callback_data='status')]
     ])
     msg = await send_or_edit(
         update,
@@ -3938,8 +3937,8 @@ async def do_scan(context: ContextTypes.DEFAULT_TYPE, session: UserScanSession, 
                         f"🕒 <i>Finished: {local_ts} (IST)</i>"
                     )
                     complete_markup = InlineKeyboardMarkup([
-                        [InlineKeyboardButton("📥 Export Hub", callback_data='menu_export', style="success"), InlineKeyboardButton("📊 Results CSV", callback_data='results', style="success")],
-                        [InlineKeyboardButton("🔙 Main Menu", callback_data='start_menu', style="danger")]
+                        [InlineKeyboardButton("📥 Export Hub", callback_data='menu_export'), InlineKeyboardButton("📊 Results CSV", callback_data='results')],
+                        [InlineKeyboardButton("🔙 Main Menu", callback_data='start_menu')]
                     ])
                     await context.bot.edit_message_text(
                         chat_id=chat_id,
@@ -3966,16 +3965,16 @@ Use /results or /export to download your generated links & CSV."""
         logger.info(f"🏁 Scan finished for user {user_id}: Total={total_processed_targets} | Success={results['success']} | Failed={results['failed']}")
         if was_stopped_by_user:
             finish_markup = InlineKeyboardMarkup([
-                [InlineKeyboardButton("⏯️ Continue Previous Scan", callback_data='scan_resume', style="success")],
-                [InlineKeyboardButton("🔄 Run New Scan", callback_data='scan_fresh', style="primary"), InlineKeyboardButton("🌐 Scan All", callback_data='scan_all', style="primary")],
-                [InlineKeyboardButton("📥 Export Hub", callback_data='menu_export', style="success"), InlineKeyboardButton("📊 Results CSV", callback_data='results', style="success")],
-                [InlineKeyboardButton("🔙 Main Menu", callback_data='start_menu', style="danger")]
+                [InlineKeyboardButton("⏯️ Continue Previous Scan", callback_data='scan_resume')],
+                [InlineKeyboardButton("🔄 Run New Scan", callback_data='scan_fresh'), InlineKeyboardButton("🌐 Scan All", callback_data='scan_all')],
+                [InlineKeyboardButton("📥 Export Hub", callback_data='menu_export'), InlineKeyboardButton("📊 Results CSV", callback_data='results')],
+                [InlineKeyboardButton("🔙 Main Menu", callback_data='start_menu')]
             ])
         else:
             finish_markup = InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔄 Run New Scan", callback_data='scan_fresh', style="primary"), InlineKeyboardButton("🌐 Scan All", callback_data='scan_all', style="primary")],
-                [InlineKeyboardButton("📥 Export Hub", callback_data='menu_export', style="success"), InlineKeyboardButton("📊 Results CSV", callback_data='results', style="success")],
-                [InlineKeyboardButton("🔙 Main Menu", callback_data='start_menu', style="danger")]
+                [InlineKeyboardButton("🔄 Run New Scan", callback_data='scan_fresh'), InlineKeyboardButton("🌐 Scan All", callback_data='scan_all')],
+                [InlineKeyboardButton("📥 Export Hub", callback_data='menu_export'), InlineKeyboardButton("📊 Results CSV", callback_data='results')],
+                [InlineKeyboardButton("🔙 Main Menu", callback_data='start_menu')]
             ])
         if chat_id:
             await safe_telegram_call(context.bot.send_message, chat_id=chat_id, text=summary, reply_markup=finish_markup, parse_mode=ParseMode.HTML)
@@ -4101,9 +4100,9 @@ Use /results or /export to download your generated links & CSV."""
                     f"👉 <i>Choose an option below to resume or start fresh:</i>"
                 )
                 stop_markup = InlineKeyboardMarkup([
-                    [InlineKeyboardButton("⏯️ Continue Previous Scan", callback_data='scan_resume', style="success")],
-                    [InlineKeyboardButton("🔄 Run New Scan", callback_data='scan_fresh', style="primary"), InlineKeyboardButton("🌐 Scan All", callback_data='scan_all', style="primary")],
-                    [InlineKeyboardButton("⚡ Scanner Menu", callback_data='menu_scanner', style="primary"), InlineKeyboardButton("🔙 Main Menu", callback_data='start_menu', style="danger")]
+                    [InlineKeyboardButton("⏯️ Continue Previous Scan", callback_data='scan_resume')],
+                    [InlineKeyboardButton("🔄 Run New Scan", callback_data='scan_fresh'), InlineKeyboardButton("🌐 Scan All", callback_data='scan_all')],
+                    [InlineKeyboardButton("⚡ Scanner Menu", callback_data='menu_scanner'), InlineKeyboardButton("🔙 Main Menu", callback_data='start_menu')]
                 ])
                 await safe_telegram_call(
                     context.bot.edit_message_text,
@@ -4148,9 +4147,9 @@ async def stop_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "📊 <i>Your progress has been saved. Choose an action to continue:</i>"
         )
         keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("⏯️ Continue Previous Scan", callback_data='scan_resume', style="success")],
-            [InlineKeyboardButton("🔄 Run New Scan", callback_data='scan_fresh', style="primary"), InlineKeyboardButton("🌐 Scan All", callback_data='scan_all', style="primary")],
-            [InlineKeyboardButton("⚡ Scanner Menu", callback_data='menu_scanner', style="primary"), InlineKeyboardButton("🔙 Main Menu", callback_data='start_menu', style="danger")]
+            [InlineKeyboardButton("⏯️ Continue Previous Scan", callback_data='scan_resume')],
+            [InlineKeyboardButton("🔄 Run New Scan", callback_data='scan_fresh'), InlineKeyboardButton("🌐 Scan All", callback_data='scan_all')],
+            [InlineKeyboardButton("⚡ Scanner Menu", callback_data='menu_scanner'), InlineKeyboardButton("🔙 Main Menu", callback_data='start_menu')]
         ])
         await send_or_edit(update, stop_text, reply_markup=keyboard)
     else:
@@ -4323,7 +4322,7 @@ async def handle_direct_paste_panels(update: Update, context: ContextTypes.DEFAU
             "💬 <b>Official Support:</b>\nContact @OwAtom for tokens, whitelist access or assistance.",
             parse_mode=ParseMode.HTML,
             reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("💬 Open Chat with @OwAtom", url="https://t.me/OwAtom", style="primary")
+                InlineKeyboardButton("💬 Open Chat with @OwAtom", url="https://t.me/OwAtom")
             ]])
         )
     else:
@@ -4354,8 +4353,8 @@ async def handle_direct_paste_panels(update: Update, context: ContextTypes.DEFAU
     if not user_id or not admin_manager.has_access(user_id):
         if chat and chat.type == "private":
             keyboard = InlineKeyboardMarkup([
-                [InlineKeyboardButton("💬 Contact Support to Get Access", url="https://t.me/OwAtom", style="primary")],
-                [InlineKeyboardButton("🆔 Copy My ID", callback_data='btn_my_id', style="primary")]
+                [InlineKeyboardButton("💬 Contact Support to Get Access", url="https://t.me/OwAtom")],
+                [InlineKeyboardButton("🆔 Copy My ID", callback_data='btn_my_id')]
             ])
             await safe_telegram_call(
                 message.reply_text,
@@ -4426,7 +4425,7 @@ async def upload_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await safe_answer(update)
 
     text = "📤 <b>Upload Panels File</b>\n\nPlease send your <code>panels.txt</code> document now (or click Cancel below to abort):"
-    markup = InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel Upload", callback_data='cancel', style="danger")]])
+    markup = InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel Upload", callback_data='cancel')]])
     await send_or_edit(update, text, reply_markup=markup)
     return 1
 
@@ -4594,7 +4593,7 @@ async def users_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(accounts) > 25:
         lines.append(f"\n<i>... and {len(accounts) - 25} more users</i>")
 
-    keyboard = [[InlineKeyboardButton("🔙 Admin Menu", callback_data='menu_admin', style="danger")]]
+    keyboard = [[InlineKeyboardButton("🔙 Admin Menu", callback_data='menu_admin')]]
     markup = InlineKeyboardMarkup(keyboard)
     await send_or_edit(update, "\n".join(lines), reply_markup=markup)
 
@@ -4788,7 +4787,7 @@ async def cleanup_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"• RAM Garbage Collected: ✅"
     )
     keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("👑 Admin Menu", callback_data='menu_admin', style="danger"), InlineKeyboardButton("🔙 Main Menu", callback_data='start_menu', style="danger")]
+        [InlineKeyboardButton("👑 Admin Menu", callback_data='menu_admin'), InlineKeyboardButton("🔙 Main Menu", callback_data='start_menu')]
     ])
     if update.callback_query:
         await safe_answer(update, "Cleanup completed! 🧹")
@@ -4928,8 +4927,8 @@ async def panels_ping_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 {"⚡ <i>All panels are operational and ready for scanning!</i>" if offline_count == 0 else "⚠️ <i>Some panels did not respond. Scanner will automatically prioritize responsive panels.</i>"}"""
 
     keyboard = [
-        [InlineKeyboardButton("🚀 Start Scan", callback_data='scan', style="success"), InlineKeyboardButton("📋 View Panels", callback_data='panels_menu', style="primary")],
-        [InlineKeyboardButton("🔙 Back to Panels", callback_data='menu_panels', style="danger")]
+        [InlineKeyboardButton("🚀 Start Scan", callback_data='scan'), InlineKeyboardButton("📋 View Panels", callback_data='panels_menu')],
+        [InlineKeyboardButton("🔙 Back to Panels", callback_data='menu_panels')]
     ]
     if init_msg:
         try:
@@ -4973,19 +4972,19 @@ async def show_export_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     keyboard = [
         [
-            InlineKeyboardButton("🎯 Fresh Links (Latest Scan)", callback_data='export_fresh', style="success"),
-            InlineKeyboardButton("📄 All Links (Archive)", callback_data='export_all', style="primary")
+            InlineKeyboardButton("🎯 Fresh Links (Latest Scan)", callback_data='export_fresh'),
+            InlineKeyboardButton("📄 All Links (Archive)", callback_data='export_all')
         ],
         [
-            InlineKeyboardButton("✂️ First 50 Fresh", callback_data='export_50', style="success"),
-            InlineKeyboardButton("📦 Remaining Fresh", callback_data='export_rem', style="success")
+            InlineKeyboardButton("✂️ First 50 Fresh", callback_data='export_50'),
+            InlineKeyboardButton("📦 Remaining Fresh", callback_data='export_rem')
         ],
         [
-            InlineKeyboardButton("📊 Results Sheet (.csv)", callback_data='results', style="success"),
-            InlineKeyboardButton("🧹 Clear Blacklist Cache", callback_data='export_clear', style="danger")
+            InlineKeyboardButton("📊 Results Sheet (.csv)", callback_data='results'),
+            InlineKeyboardButton("🧹 Clear Blacklist Cache", callback_data='export_clear')
         ],
         [
-            InlineKeyboardButton("🔙 Back to Main Menu", callback_data='start_menu', style="danger")
+            InlineKeyboardButton("🔙 Back to Main Menu", callback_data='start_menu')
         ]
     ]
     markup = InlineKeyboardMarkup(keyboard)
@@ -5365,7 +5364,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "5. Or send the command directly inside that channel."
             )
             keyboard = InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔙 Back to Channels", callback_data='menu_channels', style="danger")]
+                [InlineKeyboardButton("🔙 Back to Channels", callback_data='menu_channels')]
             ])
             await send_or_edit(update, help_text, reply_markup=keyboard)
         else:
