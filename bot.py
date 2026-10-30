@@ -33,6 +33,18 @@ try:
 except ImportError:
     pass
 
+# Restore state & databases from Turso Cloud (Zero Data Loss)
+try:
+    from turso_sync import TursoCloudManager
+    turso_mgr = TursoCloudManager("bb_checker", Path(__file__).parent.resolve())
+    turso_mgr.restore_all({
+        "admin_settings": "admin_settings.json",
+        "processed_numbers": "processed_numbers.json",
+        "panels": "panels.txt"
+    })
+except Exception as e:
+    print(f"⚠️ Turso Cloud restore notice: {e}", flush=True)
+
 import requests
 from telegram import Update, Message, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import (
@@ -303,6 +315,13 @@ def save_processed_numbers(user_id: Optional[int], data: dict):
                 tmp.unlink()
         except Exception:
             pass
+
+    # Turso Cloud Persistence Sync
+    try:
+        from turso_sync import TursoCloudManager
+        TursoCloudManager("bb_checker", BASE_DIR).set_async("processed_numbers", json.dumps(data, indent=2))
+    except Exception:
+        pass
 
 def seed_processed_numbers_from_history():
     """
