@@ -6,3 +6,7 @@ venv/
 render_config.json
 *.tmp*
 user_data/
+processed_numbers.json
+config/
+state/
+results/

