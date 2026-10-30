@@ -474,7 +474,9 @@ class RenderHealthHandler(http.server.BaseHTTPRequestHandler):
         pass
 
 def start_render_health_server():
-    port = int(os.environ.get("PORT", "8080"))
+    # If primary PORT is bound by master container runner, bind secondary or fallback
+    primary_port = os.environ.get("PORT")
+    port = int(os.environ.get("BB_PORT", "10001" if primary_port else "8080"))
     def run_server():
         try:
             class ReusableTCPServer(socketserver.TCPServer):
@@ -3328,14 +3330,14 @@ def start_bot():
     # Infinity Polling Supervision Loop with Auto-Recovery
     while True:
         try:
-            dlog("🚀 Dropping pending updates and starting infinity_polling()...")
+            dlog("🚀 Initializing infinity_polling (preserving pending user updates)...")
             try:
-                bot.delete_webhook(drop_pending_updates=True)
+                bot.delete_webhook(drop_pending_updates=False)
             except Exception as we:
                 dlog(f"⚠️ delete_webhook note: {we}")
 
             polling_is_alive = True
-            bot.infinity_polling(timeout=20, long_polling_timeout=15, skip_pending=True)
+            bot.infinity_polling(timeout=20, long_polling_timeout=15, skip_pending=False)
             dlog("ℹ️ infinity_polling exited normally. Restarting in 2s...")
         except Exception as e:
             polling_is_alive = False
