@@ -2277,7 +2277,7 @@ def show_channels_menu(chat_id: int, message_id: Optional[int] = None):
 
 def show_export_menu(chat_id: int, message_id: Optional[int] = None):
     files = [f for f in os.listdir(RESULTS_DIR) if f.startswith(f"BB_HITS_{chat_id}_")]
-    if not files:
+    if not files and (chat_id == SUPER_ADMIN_ID or chat_id in ADMIN_USER_IDS):
         files = [f for f in os.listdir(RESULTS_DIR) if f.startswith("BB_HITS_")]
     files.sort(reverse=True)
 
@@ -2878,7 +2878,9 @@ def handle_callbacks(call):
 
     # Export Actions
     elif data == "export_latest_hits":
-        files = [f for f in os.listdir(RESULTS_DIR) if f.startswith(f"BB_HITS_{chat_id}_") or f.startswith("BB_HITS_")]
+        files = [f for f in os.listdir(RESULTS_DIR) if f.startswith(f"BB_HITS_{chat_id}_")]
+        if not files and (chat_id == SUPER_ADMIN_ID or chat_id in ADMIN_USER_IDS):
+            files = [f for f in os.listdir(RESULTS_DIR) if f.startswith("BB_HITS_")]
         files.sort(reverse=True)
         if files:
             latest_txt = next((f for f in files if f.endswith(".txt")), None)
