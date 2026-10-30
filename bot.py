@@ -5513,6 +5513,21 @@ async def start_health_server(port: int = None):
                     b"Content-Length: " + str(len(body)).encode("utf-8") + b"\r\n"
                     b"Connection: close\r\n\r\n" + body
                 )
+            elif "GET /is_busy" in req_str or "GET /busy" in req_str:
+                running_scans = [s for s in list(active_scans.values()) if s.is_active()]
+                is_busy = len(running_scans) > 0
+                res = {
+                    "busy": is_busy,
+                    "process": f"{len(running_scans)} active scan(s) in progress" if is_busy else "Idle",
+                    "running_count": len(running_scans)
+                }
+                body = json.dumps(res).encode("utf-8")
+                resp = (
+                    b"HTTP/1.1 200 OK\r\n"
+                    b"Content-Type: application/json\r\n"
+                    b"Content-Length: " + str(len(body)).encode("utf-8") + b"\r\n"
+                    b"Connection: close\r\n\r\n" + body
+                )
             elif "GET /status" in req_str:
                 import resource
                 mem_mb = round(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024, 1)
@@ -5595,7 +5610,7 @@ async def post_init(application: Application):
     # Start Cloud Backup, Pin & Disaster Recovery Daemon
     try:
         from audit_cloud_manager import start_backup_daemon
-        start_backup_daemon(interval_seconds=15 * 60)
+        start_backup_daemon(interval_seconds=3 * 3600)
         logger.info("☁️ Jio / BB Scanner Auto Cloud Backup & Pin Daemon active! ✅")
     except Exception as e:
         logger.warning(f"Error starting backup daemon: {e}")
