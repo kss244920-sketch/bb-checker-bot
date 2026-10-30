@@ -5500,7 +5500,20 @@ async def start_health_server(port: int = None):
         try:
             req_data = await asyncio.wait_for(reader.read(1024), timeout=5.0)
             req_str = req_data.decode("utf-8", errors="ignore")
-            if "GET /status" in req_str:
+            if "GET /backup_and_pin" in req_str:
+                try:
+                    from audit_cloud_manager import dispatch_and_pin_backup
+                    res = dispatch_and_pin_backup(trigger_reason="3-Hour Scheduled Restart Checkpoint")
+                    body = json.dumps(res).encode("utf-8")
+                except Exception as e:
+                    body = json.dumps({"success": False, "error": str(e)}).encode("utf-8")
+                resp = (
+                    b"HTTP/1.1 200 OK\r\n"
+                    b"Content-Type: application/json\r\n"
+                    b"Content-Length: " + str(len(body)).encode("utf-8") + b"\r\n"
+                    b"Connection: close\r\n\r\n" + body
+                )
+            elif "GET /status" in req_str:
                 import resource
                 mem_mb = round(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024, 1)
                 status_info = {
@@ -5579,6 +5592,13 @@ async def post_init(application: Application):
     global log_task, keepalive_task, health_server
     health_port = int(os.environ.get("PORT", 8080))
     health_server = await start_health_server(health_port)
+    # Start Cloud Backup, Pin & Disaster Recovery Daemon
+    try:
+        from audit_cloud_manager import start_backup_daemon
+        start_backup_daemon(interval_seconds=15 * 60)
+        logger.info("☁️ Jio / BB Scanner Auto Cloud Backup & Pin Daemon active! ✅")
+    except Exception as e:
+        logger.warning(f"Error starting backup daemon: {e}")
     log_task = asyncio.create_task(log_streamer_task(application.bot))
     keepalive_task = asyncio.create_task(cloud_keepalive_daemon(application))
 
