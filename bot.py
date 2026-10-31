@@ -5636,14 +5636,15 @@ async def post_init(application: Application):
     log_task = asyncio.create_task(log_streamer_task(application.bot))
     keepalive_task = asyncio.create_task(cloud_keepalive_daemon(application))
 
-    # Start BigBasket Checker Bot (@mangerbot2423bot) Background Daemon
-    try:
-        import bb_telegram_bot
-        bb_thread = threading.Thread(target=bb_telegram_bot.start_bot, daemon=True, name="BBCheckerBotDaemon")
-        bb_thread.start()
-        logger.info("🛒 BigBasket Checker Bot (@mangerbot2423bot) 24/7 background worker active! ✅")
-    except Exception as e:
-        logger.warning(f"Error starting BigBasket Checker Bot: {e}")
+    # Start BigBasket Checker Bot (@mangerbot2423bot) Background Daemon (only if explicitly enabled to maintain 1 Service = 1 Bot)
+    if os.environ.get("ENABLE_BB_DAEMON", "0") == "1":
+        try:
+            import bb_telegram_bot
+            bb_thread = threading.Thread(target=bb_telegram_bot.start_bot, daemon=True, name="BBCheckerBotDaemon")
+            bb_thread.start()
+            logger.info("🛒 BigBasket Checker Bot (@mangerbot2423bot) 24/7 background worker active! ✅")
+        except Exception as e:
+            logger.warning(f"Error starting BigBasket Checker Bot: {e}")
 
     # Initialize and seed global deduplication database from history
     loop = asyncio.get_running_loop()
